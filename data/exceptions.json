@@ -1,0 +1,12 @@
+[
+  {
+    "id": "ex_001",
+    "courseId": "c_eng",
+    "originalDate": "2026-09-30",
+    "type": "cancel",
+    "newDate": null,
+    "newLocation": null,
+    "sourceText": "示例：国庆调休，周三英语停课一次",
+    "confirmed": true
+  }
+]

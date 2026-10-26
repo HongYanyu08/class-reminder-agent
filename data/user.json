@@ -1,0 +1,16 @@
+{
+  "id": "u_001",
+  "name": "示例同学",
+  "timezone": "Asia/Shanghai",
+  "preferences": {
+    "nightBeforeTime": "21:00",
+    "preClassLeadMin": 10,
+    "defaultTravelMin": 15,
+    "defaultBufferMin": 10,
+    "rainExtraMin": 10,
+    "quietHours": {
+      "start": "23:00",
+      "end": "07:00"
+    }
+  }
+}

@@ -1,0 +1,83 @@
+[
+  {
+    "id": "c_math",
+    "name": "高等数学",
+    "teacher": "王老师",
+    "location": {
+      "campus": "本部",
+      "building": "教三",
+      "room": "301"
+    },
+    "weekday": 1,
+    "sections": {
+      "start": 1,
+      "end": 2
+    },
+    "startTime": "08:00",
+    "endTime": "09:40",
+    "weeks": {
+      "mode": "odd",
+      "startWeek": 1,
+      "endWeek": 17
+    },
+    "requiredItems": [
+      "课本",
+      "习题册"
+    ],
+    "reminderOverride": {
+      "departureLeadMin": 40
+    }
+  },
+  {
+    "id": "c_eng",
+    "name": "大学英语",
+    "teacher": "李老师",
+    "location": {
+      "campus": "本部",
+      "building": "外语楼",
+      "room": "205"
+    },
+    "weekday": 3,
+    "sections": {
+      "start": 3,
+      "end": 4
+    },
+    "startTime": "10:00",
+    "endTime": "11:40",
+    "weeks": {
+      "mode": "all",
+      "startWeek": 1,
+      "endWeek": 16
+    },
+    "requiredItems": [
+      "英语书"
+    ],
+    "reminderOverride": {}
+  },
+  {
+    "id": "c_prog",
+    "name": "程序设计基础",
+    "teacher": "张老师",
+    "location": {
+      "campus": "本部",
+      "building": "实验楼",
+      "room": "机房2"
+    },
+    "weekday": 5,
+    "sections": {
+      "start": 5,
+      "end": 6
+    },
+    "startTime": "14:00",
+    "endTime": "15:40",
+    "weeks": {
+      "mode": "range",
+      "startWeek": 1,
+      "endWeek": 12
+    },
+    "requiredItems": [
+      "笔记本电脑"
+    ],
+    "reminderOverride": {}
+  }
+]

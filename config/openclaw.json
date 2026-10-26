@@ -1,0 +1,83 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token"
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "messaging",
+    "deny": [
+      "group:automation",
+      "group:runtime",
+      "group:fs",
+      "sessions_spawn",
+      "sessions_send"
+    ],
+    "exec": {
+      "mode": "deny"
+    },
+    "elevated": {
+      "enabled": false
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "deepseek": {
+        "baseUrl": "https://api.deepseek.com",
+        "apiKey": "${DEEPSEEK_API_KEY}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "deepseek-chat",
+            "name": "DeepSeek Chat",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "deepseek-reasoner",
+            "name": "DeepSeek Reasoner",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 128000,
+            "maxTokens": 65536
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "deepseek/deepseek-chat",
+        "fallbacks": [
+          "deepseek/deepseek-reasoner"
+        ]
+      },
+      "models": {
+        "deepseek/deepseek-chat": {},
+        "deepseek/deepseek-reasoner": {}
+      }
+    },
+    "list": [
+      {
+        "id": "class-reminder",
+        "name": "Class Reminder",
+        "workspace": ".",
+        "model": "deepseek/deepseek-chat"
+      }
+    ]
+  },
+  "channels": {}
+}

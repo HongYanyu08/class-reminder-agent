@@ -1,0 +1,17 @@
+# secrets - never commit
+.env
+*.key
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# generated runtime data (keep the example templates, ignore live copies if you split them)
+# data/occurrences.json
+# data/reminders.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
