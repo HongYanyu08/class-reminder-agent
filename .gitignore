@@ -1,6 +1,10 @@
 # secrets - never commit
 .env
 *.key
+# sender channel settings written by the Web UI: the webhook URL inside is
+# effectively a password — local file only, never committed (the tracked
+# template is data/sender_settings.example.json)
+data/sender_settings.json
 
 # python
 __pycache__/

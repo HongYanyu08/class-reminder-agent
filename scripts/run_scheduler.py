@@ -11,10 +11,13 @@ Usage:
   python3 scripts/run_scheduler.py --tick --send --dry-run
       # preview only, guaranteed: nothing sent, no file written at all
 
-Channels (src/sender.py): console (default) / outbox / webhook / gateway,
-chosen by --channel or the REMINDER_CHANNEL env var; webhook and gateway
-read their secrets/targets from env vars only (REMINDER_WEBHOOK_URL,
-REMINDER_GATEWAY_CMD). Departure reminders gain weather lead time when
+Channels (src/sender.py): console (default) / outbox / webhook / gateway.
+Configuration resolves in src/sender_settings.py: --channel flag >
+REMINDER_* env vars > data/sender_settings.json (the file maintained by
+the Web UI's 发送渠道 page; gitignored because the webhook URL is a
+secret) > defaults. A corrupt or invalid settings file aborts the send
+with exit code 2 — never a silent fallback to another channel. Departure
+reminders gain weather lead time when
 WEATHER_LAT / WEATHER_LON are set (src/weather.py, Open-Meteo, cached 3 h
 in data/weather_cache.json); unconfigured or failing weather simply means
 no extra minutes. Already-sent tasks are never re-sent: regeneration

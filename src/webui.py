@@ -14,8 +14,13 @@ Safety model:
   is invalid, the whole request is rejected and neither data file changes.
 - A successful write first creates a timestamped backup, mirroring the CLI
   tools (configure.py / handle_reply.py / parse_notice.py).
+- The 发送渠道 endpoints never return a full webhook URL or gateway
+  command: only masked renderings (src/sender_settings.py). A submitted
+  masked/empty secret keeps the stored value, so the masked display can
+  round-trip through the form without destroying the real secret.
 """
 import json
+import os
 import re
 import shutil
 from copy import deepcopy
@@ -27,6 +32,20 @@ from urllib.parse import urlparse
 from .config_edit import TYPE_LABELS, TYPE_ORDER
 from .expand import expand
 from .query import _exception_notes, _fmt_location
+from .sender import CHANNELS, SenderConfigError, SenderError
+from .sender_settings import (
+    SETTING_FIELDS,
+    SenderSettingsError,
+    build_sender_from_config,
+    load_settings_file,
+    looks_masked,
+    mask_secret,
+    mask_webhook_url,
+    resolve_sender_config,
+    sanitize_text,
+    settings_path,
+    validate_settings,
+)
 from .week_calc import teaching_week
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -406,15 +425,214 @@ def save_course_override(data_dir, payload):
     }
 
 
+# ------------------------------------------------------------ sender config ----
+_SENDER_FIELDS = set(SETTING_FIELDS)
+TEST_MESSAGE = "【测试】上课提醒渠道连通性测试"
+
+
+def _secret_values(data_dir, env, extra=()):
+    """Every full secret value that must never appear in a response:
+    stored ones, env ones, and any draft passed in `extra`."""
+    values = set(extra or ())
+    try:
+        stored = load_settings_file(data_dir)
+    except SenderSettingsError:
+        stored = {}
+    for field in ("webhookUrl", "gatewayCmd"):
+        if stored.get(field):
+            values.add(stored[field])
+    env = os.environ if env is None else env
+    for name in ("REMINDER_WEBHOOK_URL", "REMINDER_GATEWAY_CMD"):
+        if env.get(name):
+            values.add(env[name])
+    return [value for value in values if value]
+
+
+def _load_stored_or_error(data_dir):
+    try:
+        return load_settings_file(data_dir)
+    except SenderSettingsError as exc:
+        raise WebUIError(
+            f"现有发送渠道设置文件无法读取：{exc}",
+            status=500,
+        ) from exc
+
+
+def _sender_view_from(config, sources, stored):
+    effective = {
+        "channel": config.get("channel"),
+        "webhookUrlMasked": mask_webhook_url(config.get("webhookUrl")),
+        "hasWebhookUrl": bool(config.get("webhookUrl")),
+        "gatewayCmdMasked": mask_secret(config.get("gatewayCmd")),
+        "hasGatewayCmd": bool(config.get("gatewayCmd")),
+        "outboxDir": config.get("outboxDir") or "",
+        "webhookTimeoutSec": config.get("webhookTimeoutSec"),
+    }
+    stored_view = None
+    if stored is not None:
+        stored_view = {
+            "channel": stored.get("channel"),
+            "webhookUrlMasked": mask_webhook_url(stored.get("webhookUrl")),
+            "hasWebhookUrl": bool(stored.get("webhookUrl")),
+            "gatewayCmdMasked": mask_secret(stored.get("gatewayCmd")),
+            "hasGatewayCmd": bool(stored.get("gatewayCmd")),
+            "outboxDir": stored.get("outboxDir") or "",
+            "webhookTimeoutSec": stored.get("webhookTimeoutSec"),
+        }
+    return {
+        "ok": True,
+        "channels": list(CHANNELS),
+        "effective": effective,
+        "sources": sources,
+        "settingsFile": stored_view,
+        "testMessage": TEST_MESSAGE,
+    }
+
+
+def get_sender_view(data_dir, env=None):
+    """Masked view of the effective sender configuration.
+
+    Full webhook URLs / gateway commands NEVER leave this function — only
+    masked renderings (scheme://host/…last4, first-12…last-4)."""
+    stored = _load_stored_or_error(data_dir)
+    try:
+        config, sources = resolve_sender_config(env=env, data_dir=data_dir)
+    except SenderConfigError as exc:
+        raise WebUIError(f"发送渠道配置无效：{exc}", status=500) from exc
+    view = _sender_view_from(config, sources, stored)
+    view["webhookUrlMasked"] = view["effective"]["webhookUrlMasked"]
+    view["gatewayCmdMasked"] = view["effective"]["gatewayCmdMasked"]
+    view["settings"] = view["settingsFile"]
+    return view
+
+
+def _clean_sender_draft(payload, stored):
+    """Merge a submitted sender payload over the stored settings.
+
+    Masked-placeholder or empty secret fields keep the stored value
+    (that is how the masked display round-trips without destroying the
+    real secret); an explicit JSON null clears a field. Returns the
+    merged, validated settings dict."""
+    if not isinstance(payload, dict):
+        raise WebUIError("请求体必须是 JSON 对象")
+    unknown = sorted(set(payload) - _SENDER_FIELDS)
+    if unknown:
+        raise WebUIError(
+            "发现未知字段，整单拒绝",
+            errors=[f"未知字段：{', '.join(unknown)}"],
+        )
+    if not payload:
+        raise WebUIError("没有提交任何要保存的字段")
+    merged = dict(stored or {})
+    for field in ("webhookUrl", "gatewayCmd"):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if value is None:
+            merged.pop(field, None)
+        elif isinstance(value, str) and (not value.strip() or looks_masked(value)):
+            pass  # keep the stored secret untouched
+        else:
+            merged[field] = value
+    for field in ("channel", "webhookTimeoutSec", "outboxDir"):
+        if field not in payload:
+            continue
+        value = payload[field]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            merged.pop(field, None)
+        else:
+            merged[field] = value
+    try:
+        return validate_settings(merged, source="发送渠道设置")
+    except SenderSettingsError as exc:
+        raise WebUIError("发送渠道设置校验失败，未写入任何文件",
+                         errors=[str(exc)]) from exc
+
+
+def save_sender_settings(data_dir, payload, env=None):
+    """Validate a sender payload and persist it to
+    data/sender_settings.json (gitignored), backing the old file up
+    first. Environment variables still override the file at resolve
+    time; the returned view says so per field via `sources`."""
+    stored = _load_stored_or_error(data_dir)
+    cleaned = _clean_sender_draft(payload, stored)
+    path = settings_path(data_dir)
+    backup = _backup(path)
+    _write_json(path, cleaned)
+    view = get_sender_view(data_dir, env=env)
+    return {
+        "ok": True,
+        "message": "发送渠道设置已保存（环境变量如已设置仍会优先生效）",
+        "backup": backup,
+        "sender": view,
+        "effective": view["effective"],
+        "sources": view["sources"],
+    }
+
+
+def send_sender_test(data_dir, payload, env=None, transport=None,
+                     sender_factory=None):
+    """Send one fixed test message through a DRAFT sender configuration
+    (the submitted payload merged over the stored settings; nothing is
+    written to disk). Send failures are reported, never raised and never
+    hidden; every string in the result is scrubbed of full secrets."""
+    stored = _load_stored_or_error(data_dir)
+    draft = _clean_sender_draft(payload, stored)
+    config = {
+        "channel": draft.get("channel") or "console",
+        "webhookUrl": draft.get("webhookUrl"),
+        "webhookTimeoutSec": draft.get("webhookTimeoutSec", 10),
+        "gatewayCmd": draft.get("gatewayCmd"),
+        "outboxDir": draft.get("outboxDir"),
+    }
+    secrets = _secret_values(data_dir, env, extra=(
+        draft.get("webhookUrl"), draft.get("gatewayCmd")))
+
+    def scrub(text):
+        return sanitize_text(text, secrets)
+
+    try:
+        if sender_factory is not None:
+            sender = sender_factory(dict(config))
+        else:
+            sender = build_sender_from_config(
+                config, {"channel": "draft"}, data_dir=data_dir,
+                transport=transport)
+    except SenderConfigError as exc:
+        return {"ok": False, "channel": config["channel"],
+                "error": scrub(str(exc))}
+    user = _load_json(Path(data_dir) / "user.json", {})
+    task = {"id": "channel-test", "occurrenceId": None, "type": "test",
+            "scheduledAt": None}
+    try:
+        result = sender.send(task, TEST_MESSAGE, {"user": user}) or {}
+    except SenderError as exc:
+        return {"ok": False, "channel": sender.name,
+                "error": scrub(str(exc))}
+    except Exception as exc:  # a channel bug must surface, not crash the API
+        return {"ok": False, "channel": getattr(sender, "name", config["channel"]),
+                "error": scrub(f"发送失败：{type(exc).__name__}: {exc}")}
+    return {
+        "ok": True,
+        "channel": sender.name,
+        "message": f"测试消息已通过「{sender.name}」通道发送",
+        "detail": scrub(result.get("detail", "")),
+        "testMessage": TEST_MESSAGE,
+    }
+
+
 # ------------------------------------------------------------------- routing ----
 def _json_bytes(value):
     return json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-def handle_request(data_dir, method, raw_path, body=b""):
+def handle_request(data_dir, method, raw_path, body=b"", env=None,
+                   transport=None, sender_factory=None):
     """Route one request without needing a live socket.
 
-    Returns (status, content_type, response_bytes).
+    Returns (status, content_type, response_bytes). `env` / `transport` /
+    `sender_factory` are injectable for tests; production leaves them
+    as None (real environment, real HTTP transport).
     """
     parsed = urlparse(raw_path)
     path = parsed.path
@@ -424,16 +642,28 @@ def handle_request(data_dir, method, raw_path, body=b""):
             return 200, "application/json; charset=utf-8", _json_bytes(
                 get_state(data_dir)
             )
-        if method == "POST" and path in {"/api/config", "/api/course-override"}:
+        if method == "GET" and path == "/api/sender":
+            return 200, "application/json; charset=utf-8", _json_bytes(
+                get_sender_view(data_dir, env=env)
+            )
+        if method == "POST" and path in {
+            "/api/config", "/api/course-override",
+            "/api/sender", "/api/sender/test",
+        }:
             try:
                 payload = json.loads((body or b"").decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise WebUIError(f"请求体不是合法 JSON：{exc}") from exc
-            result = (
-                save_config(data_dir, payload)
-                if path == "/api/config"
-                else save_course_override(data_dir, payload)
-            )
+            if path == "/api/config":
+                result = save_config(data_dir, payload)
+            elif path == "/api/course-override":
+                result = save_course_override(data_dir, payload)
+            elif path == "/api/sender":
+                result = save_sender_settings(data_dir, payload, env=env)
+            else:
+                result = send_sender_test(
+                    data_dir, payload, env=env, transport=transport,
+                    sender_factory=sender_factory)
             return 200, "application/json; charset=utf-8", _json_bytes(result)
         if method == "GET" and path in {"/", "/index.html"}:
             if not UI_FILE.exists():

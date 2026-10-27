@@ -99,11 +99,20 @@
   .field { display: flex; flex-direction: column; gap: 8px; }
   .field label, .field-label { font-size: 14px; font-weight: 800; }
   .field small { color: var(--muted); line-height: 1.45; }
-  input[type="time"], input[type="number"] {
+  input[type="time"], input[type="number"], input[type="text"], select, textarea {
     width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 12px 13px;
     background: #fbfcfe; color: var(--ink); outline: none;
   }
-  input:focus { border-color: var(--brand); box-shadow: 0 0 0 4px rgba(56,103,232,.12); }
+  textarea { min-height: 74px; resize: vertical; line-height: 1.5; }
+  input:focus, select:focus, textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 4px rgba(56,103,232,.12); }
+  .channel-group { display: none; }
+  .channel-group.visible { display: block; }
+  .info-box {
+    padding: 14px 16px; border-radius: 14px; border: 1px solid #bcd0f7;
+    background: var(--brand-soft); color: #20365f; line-height: 1.7; font-size: 14px;
+  }
+  .info-box strong { color: var(--brand-dark); }
+  .info-box + .info-box { margin-top: 10px; }
   .subsection { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
   .switch-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px; }
   .switch-card {
@@ -195,6 +204,7 @@
     <button class="tab" type="button" data-tab="settings">提醒设置</button>
     <button class="tab" type="button" data-tab="courses">单课覆盖</button>
     <button class="tab" type="button" data-tab="upcoming">未来课程</button>
+    <button class="tab" type="button" data-tab="sender">发送渠道</button>
   </nav>
 
   <section id="panel-overview" class="panel active">
@@ -288,6 +298,79 @@
     </div>
   </section>
 
+  <section id="panel-sender" class="panel">
+    <div class="card">
+      <h2>发送渠道</h2>
+      <p class="section-intro">提醒最终从哪个通道发出去，在这里配。保存后调度器（run_scheduler --tick --send）就按这里的设置发送；如果部署环境里设了 REMINDER_* 环境变量，环境变量优先生效，本页会标明来源。</p>
+
+      <div class="info-box">
+        <strong>先说清楚：个人微信没有官方机器人接口，本页不能、也不会假装直连个人微信。</strong><br>
+        能真正把提醒推到微信的现成路径是 <strong>webhook 中转</strong>：企业微信群机器人、Server酱、PushPlus、WxPusher 这类服务会给你一个 https 的 webhook 地址，填到下面即可；或者走<strong>你自己的 OpenClaw 网关</strong>（网关命令通道，由你的 OpenClaw 把消息发到它接好的渠道）。<br>
+        webhook 地址等同于密码：只保存在本机 data/sender_settings.json（已 gitignore，不进仓库），页面上只显示打码版，不要外传、不要截图发群。
+      </div>
+
+      <div id="senderSummary" class="status" role="status" style="margin-top:14px"></div>
+
+      <form id="senderForm" style="margin-top:10px">
+        <fieldset id="senderFieldset">
+          <div class="form-grid">
+            <div class="field">
+              <label for="senderChannel">发送通道</label>
+              <select id="senderChannel">
+                <option value="console">控制台（只打印，不真发）</option>
+                <option value="outbox">发件箱文件（outbox.jsonl）</option>
+                <option value="webhook">Webhook 中转（可推到微信）</option>
+                <option value="gateway">OpenClaw 网关命令</option>
+              </select>
+              <small>先选通道，下面会出现对应的设置项。</small>
+            </div>
+          </div>
+
+          <div id="senderWebhookGroup" class="channel-group subsection">
+            <div class="form-grid">
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="senderWebhookUrl">Webhook 地址（https）</label>
+                <input id="senderWebhookUrl" type="text" autocomplete="off" spellcheck="false"
+                  placeholder="粘贴 webhook 地址：企业微信群机器人（群设置 → 群机器人 → 添加机器人）/ Server酱 / PushPlus / WxPusher 给你的 https 地址">
+                <small>已保存的地址只显示打码版。不改就别动这个框：保持打码版原样保存，不会把真地址冲掉；想换地址就清空后粘贴新的。</small>
+              </div>
+              <div class="field">
+                <label for="senderWebhookTimeout">请求超时（秒）</label>
+                <input id="senderWebhookTimeout" type="number" min="1" max="120" step="1" placeholder="10">
+                <small>留空 = 默认 10 秒；范围 1–120。</small>
+              </div>
+            </div>
+          </div>
+
+          <div id="senderGatewayGroup" class="channel-group subsection">
+            <div class="field">
+              <label for="senderGatewayCmd">网关命令模板</label>
+              <textarea id="senderGatewayCmd" autocomplete="off" spellcheck="false"
+                placeholder="例如：openclaw-send --user {user_id} --text {text}"></textarea>
+              <small>占位符：{text} 提醒正文（必填）、{task_id}、{type}、{user_id}。命令由你部署的 OpenClaw 提供，保存前请确认命令本身可用。已保存的命令只显示打码版，保持原样保存不会覆盖。</small>
+            </div>
+          </div>
+
+          <div id="senderOutboxGroup" class="channel-group subsection">
+            <div class="field">
+              <label for="senderOutboxDir">发件箱目录</label>
+              <input id="senderOutboxDir" type="text" autocomplete="off" spellcheck="false"
+                placeholder="留空 = data/outbox">
+              <small>每条提醒追加一行 JSON 到该目录的 outbox.jsonl，适合本地验证或给 OpenClaw 侧消费。</small>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="saveSenderBtn" class="primary" type="submit">保存渠道设置</button>
+            <button id="testSenderBtn" class="secondary" type="button">发送测试消息</button>
+            <div id="senderStatus" class="status" role="status" aria-live="polite"></div>
+          </div>
+          <p class="section-intro" style="margin-top:12px">「发送测试消息」用当前页面上填的设置（草稿，不先保存）发一条固定测试文案，通不通当场见分晓；失败会显示具体原因。测试不会改动已保存的设置。</p>
+        </fieldset>
+      </form>
+    </div>
+  </section>
+
   <p class="footer-note">本地工具仅监听 127.0.0.1、无鉴权。不要把端口暴露到局域网或公网。</p>
 </main>
 
@@ -302,6 +385,7 @@ const TYPE_DEFS = [
 ];
 const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 let appState = null;
+let senderState = null;
 let demoMode = false;
 
 function element(tag, className, text) {
@@ -464,6 +548,205 @@ function buildDemoState() {
       reminderTotal: 0, reminderStatusCounts: {}
     }
   };
+}
+
+const CHANNEL_LABELS = {
+  console: '控制台（只打印）',
+  outbox: '发件箱文件',
+  webhook: 'Webhook 中转',
+  gateway: 'OpenClaw 网关命令'
+};
+const SOURCE_LABELS = {
+  argument: '命令行参数', env: '环境变量', settings: '本页设置文件', default: '默认值',
+  draft: '页面草稿'
+};
+
+function buildDemoSender() {
+  return {
+    ok: true,
+    channels: ['console', 'outbox', 'webhook', 'gateway'],
+    effective: {
+      channel: 'webhook',
+      webhookUrlMasked: 'https://qyapi.weixin.qq.com/…a1b2',
+      hasWebhookUrl: true,
+      gatewayCmdMasked: '',
+      hasGatewayCmd: false,
+      outboxDir: '',
+      webhookTimeoutSec: 10
+    },
+    sources: {
+      channel: 'settings', webhookUrl: 'settings', webhookTimeoutSec: 'settings',
+      gatewayCmd: 'default', outboxDir: 'default'
+    },
+    settingsFile: {
+      channel: 'webhook',
+      webhookUrlMasked: 'https://qyapi.weixin.qq.com/…a1b2',
+      hasWebhookUrl: true,
+      gatewayCmdMasked: '',
+      hasGatewayCmd: false,
+      outboxDir: '',
+      webhookTimeoutSec: 10
+    },
+    testMessage: '【测试】上课提醒渠道连通性测试'
+  };
+}
+
+async function fetchSender() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const response = await fetch('/api/sender', {
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error('sender request failed');
+    const data = await response.json();
+    if (!data || !data.effective) throw new Error('sender shape invalid');
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function updateSenderGroups() {
+  const channel = document.getElementById('senderChannel').value;
+  document.getElementById('senderWebhookGroup').classList.toggle('visible', channel === 'webhook');
+  document.getElementById('senderGatewayGroup').classList.toggle('visible', channel === 'gateway');
+  document.getElementById('senderOutboxGroup').classList.toggle('visible', channel === 'outbox');
+}
+
+function renderSender() {
+  const summary = document.getElementById('senderSummary');
+  if (!senderState) {
+    summary.textContent = '发送渠道信息还没加载好。';
+    return;
+  }
+  const eff = senderState.effective || {};
+  const sources = senderState.sources || {};
+  const sourceText = SOURCE_LABELS[sources.channel] || sources.channel || '未知';
+  let text = '当前生效通道：' + (CHANNEL_LABELS[eff.channel] || eff.channel || '未设置') +
+    '（来源：' + sourceText + '）';
+  if (eff.channel === 'webhook') {
+    text += ' · 地址：' + (eff.webhookUrlMasked || '未填写') +
+      '（来源：' + (SOURCE_LABELS[sources.webhookUrl] || '未设置') + '）';
+  }
+  if (eff.channel === 'gateway') {
+    text += ' · 命令：' + (eff.gatewayCmdMasked || '未填写');
+  }
+  if (eff.channel === 'outbox') {
+    text += ' · 目录：' + (eff.outboxDir || 'data/outbox（默认）');
+  }
+  const envFields = Object.keys(sources).filter(field => sources[field] === 'env');
+  if (envFields.length) {
+    text += '。注意：环境变量正在覆盖 ' + envFields.join('、') + '，改本页对这些项不生效。';
+  }
+  summary.textContent = text;
+
+  const stored = senderState.settingsFile || eff;
+  document.getElementById('senderChannel').value = stored.channel || eff.channel || 'console';
+  document.getElementById('senderWebhookUrl').value =
+    stored.webhookUrlMasked || eff.webhookUrlMasked || '';
+  document.getElementById('senderGatewayCmd').value =
+    stored.gatewayCmdMasked || eff.gatewayCmdMasked || '';
+  document.getElementById('senderOutboxDir').value = stored.outboxDir || '';
+  const timeout = stored.webhookTimeoutSec !== null && stored.webhookTimeoutSec !== undefined
+    ? stored.webhookTimeoutSec : eff.webhookTimeoutSec;
+  document.getElementById('senderWebhookTimeout').value =
+    timeout === null || timeout === undefined ? '' : String(timeout);
+  updateSenderGroups();
+}
+
+function collectSenderPayload() {
+  const timeoutRaw = document.getElementById('senderWebhookTimeout').value.trim();
+  return {
+    channel: document.getElementById('senderChannel').value,
+    webhookUrl: document.getElementById('senderWebhookUrl').value.trim(),
+    webhookTimeoutSec: timeoutRaw === '' ? null : Number(timeoutRaw),
+    gatewayCmd: document.getElementById('senderGatewayCmd').value.trim(),
+    outboxDir: document.getElementById('senderOutboxDir').value.trim()
+  };
+}
+
+async function saveSender(event) {
+  event.preventDefault();
+  const status = document.getElementById('senderStatus');
+  const saveBtn = document.getElementById('saveSenderBtn');
+  const testBtn = document.getElementById('testSenderBtn');
+  const fieldset = document.getElementById('senderFieldset');
+  const payload = collectSenderPayload();
+  saveBtn.disabled = true;
+  testBtn.disabled = true;
+  fieldset.disabled = true;
+  setStatus(status, demoMode ? '正在更新演示数据…' : '正在保存…');
+  try {
+    if (demoMode) {
+      const masked = payload.webhookUrl
+        ? 'https://qyapi.weixin.qq.com/…a1b2' : '';
+      senderState = buildDemoSender();
+      senderState.effective.channel = payload.channel;
+      senderState.settingsFile.channel = payload.channel;
+      if (payload.webhookUrl && payload.webhookUrl.indexOf('•') === -1 &&
+          payload.webhookUrl.indexOf('…') === -1) {
+        senderState.effective.webhookUrlMasked = masked;
+        senderState.effective.hasWebhookUrl = true;
+        senderState.settingsFile.webhookUrlMasked = masked;
+        senderState.settingsFile.hasWebhookUrl = true;
+      }
+      renderSender();
+      setStatus(status, '演示模式不会保存到文件；本次修改只在本页演示数据里生效。', 'success');
+    } else {
+      const result = await postJSON('/api/sender', payload);
+      if (result.sender) senderState = result.sender;
+      renderSender();
+      const backupText = result.backup ? '，已备份原文件：' + result.backup : '';
+      setStatus(status, '保存成功' + backupText + '。调度器下次发送就会用这套设置（环境变量覆盖项除外）。', 'success');
+    }
+  } catch (error) {
+    setStatus(status, error.message || '保存失败', 'error');
+  } finally {
+    saveBtn.disabled = false;
+    testBtn.disabled = false;
+    fieldset.disabled = false;
+  }
+}
+
+async function testSender() {
+  const status = document.getElementById('senderStatus');
+  const saveBtn = document.getElementById('saveSenderBtn');
+  const testBtn = document.getElementById('testSenderBtn');
+  const fieldset = document.getElementById('senderFieldset');
+  if (demoMode) {
+    setStatus(status, '演示模式：这是模拟测试，并没有真的发出任何消息。连接本地服务后，这里会用当前草稿设置真发一条测试消息。');
+    return;
+  }
+  const payload = collectSenderPayload();
+  saveBtn.disabled = true;
+  testBtn.disabled = true;
+  fieldset.disabled = true;
+  setStatus(status, '正在发送测试消息…');
+  try {
+    const response = await fetch('/api/sender/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    let data = null;
+    try { data = await response.json(); } catch (error) { data = null; }
+    if (data && data.ok) {
+      setStatus(status, '测试成功：' + (data.message || '测试消息已发送') +
+        (data.detail ? '（' + data.detail + '）' : '') + '。去目标渠道确认一下有没有收到。', 'success');
+    } else {
+      const reason = (data && (data.error || (data.errors || []).join('\n'))) ||
+        '测试失败，请稍后重试';
+      setStatus(status, '测试失败：' + reason, 'error');
+    }
+  } catch (error) {
+    setStatus(status, '测试失败：' + (error.message || '网络错误'), 'error');
+  } finally {
+    saveBtn.disabled = false;
+    testBtn.disabled = false;
+    fieldset.disabled = false;
+  }
 }
 
 async function fetchState() {
@@ -804,6 +1087,7 @@ function renderAll() {
   fillGlobalForm();
   renderCourses();
   renderUpcoming();
+  renderSender();
 }
 
 async function loadState() {
@@ -817,6 +1101,15 @@ async function loadState() {
     appState = buildDemoState();
     demoMode = true;
   }
+  if (demoMode) {
+    senderState = buildDemoSender();
+  } else {
+    try {
+      senderState = await fetchSender();
+    } catch (error) {
+      senderState = null;
+    }
+  }
   renderAll();
 }
 
@@ -824,6 +1117,9 @@ document.querySelectorAll('.tab').forEach(button => {
   button.addEventListener('click', () => switchTab(button.dataset.tab));
 });
 document.getElementById('globalForm').addEventListener('submit', saveGlobal);
+document.getElementById('senderForm').addEventListener('submit', saveSender);
+document.getElementById('testSenderBtn').addEventListener('click', testSender);
+document.getElementById('senderChannel').addEventListener('change', updateSenderGroups);
 document.getElementById('reloadBtn').addEventListener('click', () => {
   setStatus(document.getElementById('globalStatus'), '正在重新读取…');
   loadState().then(() => {

@@ -220,6 +220,14 @@ class DemoModeTest(unittest.TestCase):
         self.assertIn("演示模式不会保存到文件", HTML)
         self.assertIn("fetch('/api/state'", HTML)
 
+    def test_sender_tab_renders_in_demo_with_masked_sample(self):
+        self.assertIn('data-tab="sender"', HTML)
+        self.assertIn("buildDemoSender", HTML)
+        self.assertIn("https://qyapi.weixin.qq.com/…a1b2", HTML)
+        self.assertIn("个人微信没有官方机器人接口", HTML)
+        self.assertIn("fetch('/api/sender'", HTML)
+        self.assertIn("演示模式：这是模拟测试", HTML)
+
     def test_dynamic_text_does_not_use_inner_html(self):
         self.assertNotIn(".innerHTML", HTML)
         self.assertIn("textContent", HTML)

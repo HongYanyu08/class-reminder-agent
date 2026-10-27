@@ -1,30 +1,39 @@
 """Reminder sending layer: turn a due ReminderTask into an actual message.
 
-Pluggable channels, selected by the REMINDER_CHANNEL environment variable
-(or the run_scheduler --channel flag):
+Pluggable channels:
 
-  console  print the message (the original MVP behaviour; default + fallback)
+  console  print the message (the original MVP behaviour; default)
   outbox   append one JSON line per message to a JSONL file that a human or
            the OpenClaw side can consume/verify locally
-           (dir: REMINDER_OUTBOX_DIR, default <data-dir>/outbox)
-  webhook  POST the message as JSON to REMINDER_WEBHOOK_URL
-           (optional REMINDER_WEBHOOK_TIMEOUT, seconds, default 10)
-  gateway  run an operator-configured command, REMINDER_GATEWAY_CMD, with
-           placeholders {text} {task_id} {type} {user_id}. config/openclaw.json
-           ships an empty "channels" object and a loopback gateway skeleton
-           but no message-endpoint contract this project can rely on, so the
+           (default dir <data-dir>/outbox)
+  webhook  POST the message as JSON to an https webhook URL (the relay
+           path that can reach WeChat: 企业微信群机器人 / Server酱 /
+           PushPlus / WxPusher webhooks, or the user's own relay)
+  gateway  run an operator-configured command template with placeholders
+           {text} {task_id} {type} {user_id}. config/openclaw.json ships an
+           empty "channels" object and a loopback gateway skeleton but no
+           message-endpoint contract this project can rely on, so the
            actual command must come from the deployment's OpenClaw version
            and is only integration-tested against a real OpenClaw install.
            Nothing about that external CLI is invented here.
 
-Secrets (webhook URL, gateway command, any tokens they embed) are read from
-the environment ONLY — never from data files, never written to disk by us.
+Where the channel and its secrets come from is resolved by
+src/sender_settings.py, in this order (highest first):
+
+  --channel flag / build_sender argument
+  > environment (REMINDER_CHANNEL, REMINDER_WEBHOOK_URL,
+    REMINDER_WEBHOOK_TIMEOUT, REMINDER_GATEWAY_CMD, REMINDER_OUTBOX_DIR)
+  > data/sender_settings.json — the file the Web UI's 发送渠道 page
+    maintains. It is gitignored and never committed, because a webhook
+    URL is effectively a password.
+  > defaults (console, 10 s webhook timeout)
 
 Failure model (see scheduler.dispatch_due for the state writes):
 - a send either succeeds (-> task sent) or raises SenderError (-> failed).
 - SenderConfigError is a SenderError raised BEFORE anything is dispatched
-  (channel missing/misconfigured): the CLI reports it and exits without
-  touching task states, so a typo'd channel never marks tasks failed.
+  (channel missing/misconfigured, or a corrupt settings file): the CLI
+  reports it and exits without touching task states, so a typo'd channel
+  never marks tasks failed.
 """
 import json, os, shlex, subprocess, sys, urllib.error, urllib.request
 from datetime import datetime
@@ -101,7 +110,8 @@ class WebhookSender:
     def __init__(self, url, timeout=10, transport=None):
         if not url:
             raise SenderConfigError(
-                "webhook 通道未配置：请设置环境变量 REMINDER_WEBHOOK_URL")
+                "webhook 通道未配置：请设置环境变量 REMINDER_WEBHOOK_URL，"
+                "或在 Web UI 的「发送渠道」页填写 webhook 地址")
         self.url, self.timeout = url, timeout
         self.transport = transport or _urllib_transport
 
@@ -138,7 +148,8 @@ class GatewaySender:
         if not command_template:
             raise SenderConfigError(
                 "gateway 通道未配置：请设置环境变量 REMINDER_GATEWAY_CMD"
-                "（由部署环境的 OpenClaw 命令构成的命令模板）")
+                "（由部署环境的 OpenClaw 命令构成的命令模板），"
+                "或在 Web UI 的「发送渠道」页填写网关命令")
         self.template, self.timeout = command_template, timeout
         self.runner = runner or self._run
 
@@ -167,29 +178,14 @@ class GatewaySender:
 
 # ----------------------------------------------------------------- factory ----
 def build_sender(channel=None, env=None, data_dir=None, stream=None, transport=None):
-    """Build a sender. Channel resolution: argument > REMINDER_CHANNEL env >
-    'console'. Raises SenderConfigError with an actionable message when the
-    chosen channel is unknown or its required env config is missing."""
+    """Build a sender. Resolution (src/sender_settings.py): argument >
+    REMINDER_* env > data/sender_settings.json (only when data_dir is
+    given) > defaults. Raises SenderConfigError with an actionable message
+    when the chosen channel is unknown, its required config is missing, or
+    the settings file is corrupt/invalid."""
+    from .sender_settings import build_sender_from_config, resolve_sender_config
     env = os.environ if env is None else env
-    channel = (channel or env.get("REMINDER_CHANNEL") or "console").strip().lower()
-    if channel == "console":
-        return ConsoleSender(stream=stream)
-    if channel == "outbox":
-        outbox_dir = env.get("REMINDER_OUTBOX_DIR")
-        if not outbox_dir:
-            base = Path(data_dir) if data_dir else Path(__file__).resolve().parent.parent / "data"
-            outbox_dir = base / "outbox"
-        return OutboxSender(outbox_dir)
-    if channel == "webhook":
-        timeout_raw = env.get("REMINDER_WEBHOOK_TIMEOUT", "10")
-        try:
-            timeout = float(timeout_raw)
-        except (TypeError, ValueError):
-            raise SenderConfigError(
-                f"REMINDER_WEBHOOK_TIMEOUT 不是数字：{timeout_raw!r}")
-        return WebhookSender(env.get("REMINDER_WEBHOOK_URL"),
-                             timeout=timeout, transport=transport)
-    if channel == "gateway":
-        return GatewaySender(env.get("REMINDER_GATEWAY_CMD"))
-    raise SenderConfigError(
-        f"未知发送通道 REMINDER_CHANNEL={channel!r}，可用通道：{', '.join(CHANNELS)}")
+    config, sources = resolve_sender_config(
+        channel=channel, env=env, data_dir=data_dir)
+    return build_sender_from_config(
+        config, sources, data_dir=data_dir, stream=stream, transport=transport)

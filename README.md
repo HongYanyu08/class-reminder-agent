@@ -36,12 +36,12 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
 | 调课/停课通知解析 | ✅ 已实现 | 停课→cancel、调课→reschedule、换教室→location_change、改线上→online；只影响单次课，不动周期模板；锚不准拒绝写入 |
 | 周次与展开 | ✅ 已实现 | 教学周、单双周、节假日、调休（makeupDays）；滚动展开未来 14 天 Occurrence 并应用例外 |
 | 提醒调度 | ✅ 已实现 | 三级提醒时刻全部确定性计算；每 tick 重新生成任务并与已存运行状态合并，已发送的永不被重置 |
-| 发送层 | ✅ 已实现 | 可插拔通道 console / outbox / webhook / gateway（见下）；成功回写 sent+sentAt+channel，失败回写 failed+error；已 sent 不重发，failed 不自动重试 |
+| 发送层 | ✅ 已实现 | 可插拔通道 console / outbox / webhook / gateway（见下）；渠道与目标可在 Web UI 的「发送渠道」页配置（存 `data/sender_settings.json`，已 gitignore；环境变量仍优先，见「发送通道」）；成功回写 sent+sentAt+channel，失败回写 failed+error；已 sent 不重发，failed 不自动重试 |
 | 天气提前量 | ✅ 已实现 | `src/weather.py` 接 Open-Meteo（免费、无需 key）：坐标配了才启用，降雨给 departure 加 `rainExtraMin`（默认 10 分钟）、恶劣天气加 `severeExtraMin`（默认 20 分钟）；预报缓存 3 小时，失败回退过期缓存或不加量，绝不阻塞 tick（见“天气提前量”） |
 | 回执确认 | ✅ 已实现 | `src/ack.py` + `scripts/handle_reply.py`：回复分确认/请假/稍后三类确定性回写（见“处理回执”）；已 sent 超过宽限期（默认 10 分钟）仍未确认的课自动生成一条 follow_up 追问，一次课只追问一次 |
 | 对话查课表 | ✅ 已实现 | `src/query.py` + `scripts/ask.py`：确定性问答——按日期查、按课程查（时间/地点/携带/老师）、下节课、本周概览；答案全部经 `expand()` 计算，例外如实呈现（停课注明、调课按新时间与新地点）；日期锚不准/课程多义返回澄清，绝不猜；只读，不写任何数据（见“对话查课表”） |
 | 对话改提醒配置 | ✅ 已实现 | `src/config_edit.py` + `scripts/configure.py`：一句话改全局偏好（前晚时间/课前提前量/路程/缓冲/天气加量/追问宽限/静默时段）、开关四类提醒、改单课覆盖（出门提前量、单课开关）；变更计划先预览，用户确认 `--apply` 才写入并备份；数值含糊/越界/课程多义一律待确认不猜（见“对话改提醒配置”） |
-| Web 配置 UI | ✅ 已实现 | `src/webui.py` + `scripts/serve_ui.py` + `ui/index.html`：本地网页含总览、提醒设置、单课覆盖、未来 14 天课程四个区块；服务端逐项校验、非法整单拒绝、写前备份；无服务打开同一 HTML 时自动进入演示模式（示例数据，不会保存）（见“Web 配置 UI”） |
+| Web 配置 UI | ✅ 已实现 | `src/webui.py` + `scripts/serve_ui.py` + `ui/index.html`：本地网页含总览、提醒设置、单课覆盖、未来 14 天课程、发送渠道五个区块；服务端逐项校验、非法整单拒绝、写前备份；发送渠道页可配通道、保存设置并真发一条测试消息，webhook URL 只回打码版；无服务打开同一 HTML 时自动进入演示模式（示例数据，不会保存）（见“Web 配置 UI”） |
 | OpenClaw 网关联调 | ⬜ 待联调 | gateway 通道是命令适配接口（见下），需在真实 OpenClaw 环境配置命令后联调，本仓库无法自证 |
 
 ## 快速开始
@@ -50,7 +50,8 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
 
 1. （接 OpenClaw 时）把 `config/openclaw.json` 复制到 `~/.openclaw/openclaw.json`，
    把本目录作为 agent 的 workspace。
-2. 设置环境变量（**密钥只走环境变量，绝不写进任何文件**，清单见 `.env.example`）：
+2. 设置环境变量（**密钥只走环境变量，或 Web UI 维护的已 gitignore 的
+   `data/sender_settings.json`，绝不写进仓库任何文件**，清单见 `.env.example`）：
    ```bash
    export DEEPSEEK_API_KEY=你的key      # 只在需要 LLM 解析/文案时用到；确定性脚本不依赖它
    export REMINDER_CHANNEL=outbox       # 发送通道：console|outbox|webhook|gateway（默认 console）
@@ -149,7 +150,7 @@ python3 scripts/serve_ui.py                         # 默认 http://127.0.0.1:87
 python3 scripts/serve_ui.py --port 8766             # 换端口
 python3 scripts/serve_ui.py --data-dir /tmp/my-data # 使用另一份数据目录
 ```
-启动后在本机浏览器打开页面，四个区块：
+启动后在本机浏览器打开页面，五个区块：
 - **总览**：学期与当前教学周、课程数、未来 7 / 14 天课程数、提醒任务各状态计数。
 - **提醒设置**：改前晚时间、课前/路程/缓冲/天气加量/追问宽限、静默时段，并开关四类提醒。
   保存走 `POST /api/config`，服务端逐项校验（分钟 0–180、时间 HH:MM、类型名合法），
@@ -157,6 +158,12 @@ python3 scripts/serve_ui.py --data-dir /tmp/my-data # 使用另一份数据目�
 - **单课覆盖**：每门课单独保存出门提前量（留空 = 清除覆盖、回到全局）和四类提醒开关，
   走 `POST /api/course-override`，写 `courses.json` 前同样备份；课程不存在会明确报错。
 - **未来课程**：未来 14 天按日展开（含单双周、假期、调休），停课/调课等例外有明确标注。
+- **发送渠道**：选通道（console / outbox / webhook / gateway），选中才显示对应输入框；
+  保存走 `POST /api/sender` 写入 `data/sender_settings.json`（写前备份），「发送测试消息」
+  走 `POST /api/sender/test` 用页面草稿（不落盘）真发一条固定测试文案，成败当场显示原因。
+  `GET /api/sender` 只回**打码版**的 webhook URL（协议 + 域名 + 末 4 位）与网关命令，
+  且保存时提交打码版/空值表示沿用已存的真值，不会把真地址冲掉。页面顶部写明来源
+  （环境变量 / 设置文件 / 默认），环境变量覆盖的项会明确提示改本页不生效。
 
 **演示模式**：直接双击打开 `ui/index.html`、或把它当静态页托管（拿不到 `/api/state`）时，
 页面自动用内置的 3 门示例课数据渲染，顶部显示“演示模式（示例数据，未连接服务）”横幅；
@@ -200,14 +207,40 @@ export WEATHER_LON=你的经度
 
 ## 发送通道
 
-通道由 `--channel` 或环境变量 `REMINDER_CHANNEL` 选择（默认 console）。敏感配置只读环境变量。
+通道配置的解析顺序（`src/sender_settings.py`，调度器与 Web UI 共用同一套）：
+
+```
+--channel 参数  >  REMINDER_* 环境变量  >  data/sender_settings.json（Web UI 维护）  >  默认值（console / 超时 10 秒）
+```
+
+`data/sender_settings.json` 已被 `.gitignore` 忽略（模板见 `data/sender_settings.example.json`），
+因为里面的 webhook URL 等同于密码。设置文件损坏或字段非法时，发送在启动阶段明确报错
+（退出码 2），**绝不静默回退到别的通道乱发**。
 
 | 通道 | 配置 | 行为 |
 |---|---|---|
-| `console` | 无 | 把提醒打印到标准输出（原 MVP 行为），默认/回退通道 |
-| `outbox` | `REMINDER_OUTBOX_DIR`（默认 `<data-dir>/outbox`） | 每条提醒追加一行 JSON 到 `outbox.jsonl`（含 taskId、课程、文案、发送时间），便于本地验证与 OpenClaw 侧消费 |
-| `webhook` | `REMINDER_WEBHOOK_URL`（必填）、`REMINDER_WEBHOOK_TIMEOUT`（秒，默认 10） | POST JSON 到该 URL，载荷含 taskId/type/scheduledAt/message；非 2xx、超时、连不上都算发送失败并记录原因。**URL 只放环境变量，不要写进仓库任何文件** |
-| `gateway` | `REMINDER_GATEWAY_CMD`（必填） | 命令模板适配：占位符 `{text}` `{task_id}` `{type}` `{user_id}` 替换后经 shlex 拆分、无 shell 执行，退出码非 0 算失败。本项目的 `config/openclaw.json` 里 `channels` 为空、没有可依据的消息端点约定，所以具体命令要按部署环境的 OpenClaw 版本的通道命令来配，**需要真实 OpenClaw 环境联调**，本仓库不编造其协议 |
+| `console` | 无 | 把提醒打印到标准输出（原 MVP 行为），默认通道 |
+| `outbox` | `outboxDir` / `REMINDER_OUTBOX_DIR`（默认 `<data-dir>/outbox`） | 每条提醒追加一行 JSON 到 `outbox.jsonl`（含 taskId、课程、文案、发送时间），便于本地验证与 OpenClaw 侧消费 |
+| `webhook` | `webhookUrl`（必填）/ `REMINDER_WEBHOOK_URL`；`webhookTimeoutSec` / `REMINDER_WEBHOOK_TIMEOUT`（秒，默认 10） | POST JSON 到该 https URL，载荷含 taskId/type/scheduledAt/message；非 2xx、超时、连不上都算发送失败并记录原因。**URL 只放环境变量或 gitignore 的设置文件，不要写进仓库任何文件** |
+| `gateway` | `gatewayCmd` / `REMINDER_GATEWAY_CMD`（必填，必须含 `{text}`） | 命令模板适配：占位符 `{text}` `{task_id}` `{type}` `{user_id}` 替换后经 shlex 拆分、无 shell 执行，退出码非 0 算失败。本项目的 `config/openclaw.json` 里 `channels` 为空、没有可依据的消息端点约定，所以具体命令要按部署环境的 OpenClaw 版本的通道命令来配，**需要真实 OpenClaw 环境联调**，本仓库不编造其协议 |
+
+### 接入微信（诚实版）
+
+**个人微信没有官方机器人接口，本项目不能、也不会假装能直连个人微信。** 能真正把提醒
+推到微信的现成路径只有下面三条，都在本页/上表能配：
+
+1. **企业微信群机器人**：在企业微信群里「群设置 → 群机器人 → 添加机器人」，拿到
+   `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...` 地址，在 Web UI 的
+   「发送渠道」页选 webhook 通道填入即可。提醒会发到那个群里。
+2. **Server酱 / PushPlus / WxPusher 等中转服务**：这类服务把 webhook 推送转成微信
+   服务号/模板消息推到你个人微信。去对应服务拿到你的 webhook（推送）地址，同样填到
+   webhook 通道即可。各家的载荷格式以其文档为准（本项目发的是通用 JSON，
+   含 `message` / `text` 字段）。
+3. **你自己的 OpenClaw 网关**：OpenClaw 那边接好渠道后，把它的发送命令按
+   `{text}` 等占位符填成 gateway 命令模板，走 gateway 通道发出。
+
+三条路都建议先在「发送渠道」页点一次「发送测试消息」确认能收到，再把 HEARTBEAT
+切到 `--tick --send`。
 
 **状态与失败策略**（`scheduler.dispatch_due` + `merge_task_states`，均有测试）：
 - 发送成功 → 任务回写 `status=sent`、`sentAt`、`channel`；之后每 tick 重新生成任务都会把
@@ -244,12 +277,12 @@ export WEATHER_LON=你的经度
 ```
 SOUL.md / AGENTS.md / HEARTBEAT.md / USER.md / TOOLS.md   OpenClaw 智能体定义（HEARTBEAT 每 5 分钟触发 tick）
 config/openclaw.json     OpenClaw 基础配置（DeepSeek 模型、网关与工具权限收紧；channels 待部署时配置）
-data/                    term / courses / exceptions / user（输入）+ occurrences / reminders（生成）+ outbox/（发送日志，运行时产生）
+data/                    term / courses / exceptions / user（输入）+ occurrences / reminders（生成）+ outbox/（发送日志，运行时产生）+ sender_settings.json（渠道设置，UI 维护，已 gitignore；模板 sender_settings.example.json）
 skills/                  timetable-import / notice-parser / reminder-composer / course-query / reminder-config（给智能体的操作规程）
-src/                     week_calc / expand / scheduler / sender / timetable_import / notice_parser / ack / weather / query / config_edit / webui（纯标准库）
+src/                     week_calc / expand / scheduler / sender / sender_settings（渠道设置解析）/ timetable_import / notice_parser / ack / weather / query / config_edit / webui（纯标准库）
 scripts/                 run_scheduler（调度入口）/ import_timetable / parse_notice / handle_reply / configure（默认预览，--apply/--send 才生效）/ ask（对话查课表，只读）/ serve_ui（本地 Web 配置 UI）
 ui/                      index.html（配置中心单文件前端，含演示模式，无外部资源）
-tests/                   核心逻辑 + 导入 + 通知解析 + 发送层 + 回执 + 天气 + 对话查询 + 改配置 + Web UI 单元测试（190 个）
+tests/                   核心逻辑 + 导入 + 通知解析 + 发送层 + 渠道设置 + 回执 + 天气 + 对话查询 + 改配置 + Web UI 单元测试（216 个）
 examples/                示例课表（.txt / .csv）
 .env.example             环境变量清单（只有变量名与说明，无真实值）
 ```
@@ -257,15 +290,19 @@ examples/                示例课表（.txt / .csv）
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests        # 190 个，全部本地运行
+python3 -m unittest discover -s tests        # 216 个，全部本地运行
 ```
 发送层测试全部走注入的假 transport / 假 runner 与临时目录，不打真实外网、不动真实 `data/`；
-CLI 端到端测试用临时数据副本验证发送回写、不重发与 dry-run 不落盘。
+渠道设置与 UI 测试发送走本机 localhost 假 webhook；CLI 端到端测试用临时数据副本
+验证发送回写、不重发、dry-run 不落盘，以及设置文件驱动发送与损坏设置报错退出。
 
 ## 安全约定
 
-- 密钥（DeepSeek API key、webhook URL、网关命令里可能含的令牌）**只走环境变量**，
-  不写进代码、配置、数据文件或仓库；`.env` 已被 `.gitignore` 忽略。
+- 密钥（DeepSeek API key、webhook URL、网关命令里可能含的令牌）**只走环境变量，
+  或 Web UI 维护的 `data/sender_settings.json`**——该文件已 gitignore、只存本机，
+  绝不进仓库；**webhook URL 等同于密钥，别外传、别截图发群、别贴到聊天里**。
+  UI 与 API 返回的 URL/命令一律打码，日志与报错也不会出现完整值。`.env` 同样已被
+  `.gitignore` 忽略。
 - 所有改数据的操作默认预览：导入/通知解析要 `--apply`，发送要 `--send`，
   `--dry-run` 永远不写文件；正式写入前自动生成带时间戳的备份。
 - 锚不准不猜：解析器把不确定的字段标“待确认”留空，而不是编造课程、日期或教学楼。
