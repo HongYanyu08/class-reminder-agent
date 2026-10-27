@@ -9,9 +9,10 @@ SOUL.md / AGENTS.md / HEARTBEAT.md / USER.md / TOOLS.md   OpenClaw 智能体定�
 config/openclaw.json     OpenClaw 基础配置（DeepSeek 模型、网关与工具权限收紧）
 data/                    term / courses / exceptions / user（输入）+ occurrences / reminders（生成）
 skills/                  timetable-import / notice-parser / reminder-composer
-src/                     week_calc.py / expand.py / scheduler.py（纯标准库）
+src/                     week_calc.py / expand.py / scheduler.py / timetable_import.py / notice_parser.py（纯标准库）
 scripts/run_scheduler.py HEARTBEAT 每 5 分钟调用的调度入口
-tests/test_core.py       核心逻辑单元测试
+scripts/import_timetable.py / parse_notice.py   课表导入 / 通知解析（默认预览，--apply 才写入）
+tests/                   核心逻辑 + 导入 + 通知解析单元测试（32 个）
 ```
 
 ## 快速开始
@@ -38,9 +39,18 @@ python3 scripts/import_timetable.py examples/sample_timetable.txt --apply   # �
 支持 .txt（一行一课）/ .csv / .xlsx / .json；周次（单/双/列表）、节次转时间、地点拆分全是确定性解析，
 识别不了的字段会标“待确认”而不是猜。图片课表先由智能体视觉读成文字再走 txt 导入，见 `skills/timetable-import/SKILL.md`。
 
+## 解析调课/停课通知
+```bash
+python3 scripts/parse_notice.py "大学英语 2026年9月16日（周三）的课改到周五线上上课"   # 先预览（不写入）
+python3 scripts/parse_notice.py "高等数学 2026年9月21日停课一次" --apply              # 确认后写入（自动备份+去重）
+python3 scripts/parse_notice.py "本周三大学英语停课一次" --date 2026-09-14             # 相对日期需给通知日期才能锚定
+```
+确定性解析出一条 CourseException（cancel / reschedule / location_change / online），只影响单次课、
+不改周期模板；课程或日期锚不准时标“待确认”并拒绝写入，绝不猜。见 `skills/notice-parser/SKILL.md`。
+
 ## 下一步（TODO）
 - [ ] run_scheduler 的发送从 print 改为真实渠道发送（Telegram/WhatsApp 等）
 - [ ] 接入天气 API，出门提醒按天气加提前量
 - [x] timetable-import：文字/CSV/XLSX/JSON 导入（图片经智能体转文字后导入）
-- [ ] notice-parser 接 DeepSeek 解析后人工确认入库
+- [x] notice-parser：确定性解析调课/停课通知，预览确认后写入 exceptions.json（DeepSeek 只负责送原文/复述，不参与锚定）
 - [ ] 提醒状态机：收到回复后 acknowledged / snoozed 的回写
