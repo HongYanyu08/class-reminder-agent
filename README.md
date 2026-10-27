@@ -23,7 +23,7 @@
         ↓  LLM 只负责转文字与措辞，锚定与解析在确定性代码里完成
 data/*.json ──→ src/ 确定性核心 ──→ Occurrence（未来 14 天）──→ ReminderTask
  term/courses     week_calc 周次/调休      expand 展开+应用例外      scheduler 生成/合并状态/分发
- exceptions/user  timetable_import 导入    notice_parser 通知解析    sender 发送 / ack 回执 / query 查课表 / config_edit 改配置
+ exceptions/user  timetable_import 导入    notice_parser 通知解析    sender 发送 / ack 回执 / query 查课表 / config_edit 改配置 / webui 配置界面
         ↑
 HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期任务经 sender 发出并回写状态
 ```
@@ -41,6 +41,7 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
 | 回执确认 | ✅ 已实现 | `src/ack.py` + `scripts/handle_reply.py`：回复分确认/请假/稍后三类确定性回写（见“处理回执”）；已 sent 超过宽限期（默认 10 分钟）仍未确认的课自动生成一条 follow_up 追问，一次课只追问一次 |
 | 对话查课表 | ✅ 已实现 | `src/query.py` + `scripts/ask.py`：确定性问答——按日期查、按课程查（时间/地点/携带/老师）、下节课、本周概览；答案全部经 `expand()` 计算，例外如实呈现（停课注明、调课按新时间与新地点）；日期锚不准/课程多义返回澄清，绝不猜；只读，不写任何数据（见“对话查课表”） |
 | 对话改提醒配置 | ✅ 已实现 | `src/config_edit.py` + `scripts/configure.py`：一句话改全局偏好（前晚时间/课前提前量/路程/缓冲/天气加量/追问宽限/静默时段）、开关四类提醒、改单课覆盖（出门提前量、单课开关）；变更计划先预览，用户确认 `--apply` 才写入并备份；数值含糊/越界/课程多义一律待确认不猜（见“对话改提醒配置”） |
+| Web 配置 UI | ✅ 已实现 | `src/webui.py` + `scripts/serve_ui.py` + `ui/index.html`：本地网页含总览、提醒设置、单课覆盖、未来 14 天课程四个区块；服务端逐项校验、非法整单拒绝、写前备份；无服务打开同一 HTML 时自动进入演示模式（示例数据，不会保存）（见“Web 配置 UI”） |
 | OpenClaw 网关联调 | ⬜ 待联调 | gateway 通道是命令适配接口（见下），需在真实 OpenClaw 环境配置命令后联调，本仓库无法自证 |
 
 ## 快速开始
@@ -142,6 +143,28 @@ python3 scripts/configure.py "我现在的提醒设置是怎样的"         # �
 - 全局没有单一的“出门提前量”字段（出门时刻 = 路程 + 缓冲，或单课覆盖），
   没点名课程就说改出门时间会被要求说清改哪一项。
 
+### Web 配置 UI
+```bash
+python3 scripts/serve_ui.py                         # 默认 http://127.0.0.1:8765/
+python3 scripts/serve_ui.py --port 8766             # 换端口
+python3 scripts/serve_ui.py --data-dir /tmp/my-data # 使用另一份数据目录
+```
+启动后在本机浏览器打开页面，四个区块：
+- **总览**：学期与当前教学周、课程数、未来 7 / 14 天课程数、提醒任务各状态计数。
+- **提醒设置**：改前晚时间、课前/路程/缓冲/天气加量/追问宽限、静默时段，并开关四类提醒。
+  保存走 `POST /api/config`，服务端逐项校验（分钟 0–180、时间 HH:MM、类型名合法），
+  **任一项非法整单拒绝并显示具体字段原因，不部分写入**；成功时先给 `user.json` 做时间戳备份。
+- **单课覆盖**：每门课单独保存出门提前量（留空 = 清除覆盖、回到全局）和四类提醒开关，
+  走 `POST /api/course-override`，写 `courses.json` 前同样备份；课程不存在会明确报错。
+- **未来课程**：未来 14 天按日展开（含单双周、假期、调休），停课/调课等例外有明确标注。
+
+**演示模式**：直接双击打开 `ui/index.html`、或把它当静态页托管（拿不到 `/api/state`）时，
+页面自动用内置的 3 门示例课数据渲染，顶部显示“演示模式（示例数据，未连接服务）”横幅；
+演示模式的保存只改本页内存并明确提示不会写入文件。由 `serve_ui.py` 提供服务时则走真实 API。
+
+> ⚠️ **安全**：这个 UI **仅本机使用、无鉴权**，默认只绑 `127.0.0.1`。
+> 不要改绑 `0.0.0.0`，更不要把端口暴露到局域网或公网。
+
 ### 跑调度器
 ```bash
 python3 scripts/run_scheduler.py --expand --from 2026-09-07 --days 14   # 只展开课表+生成任务（写 occurrences/reminders）
@@ -223,9 +246,10 @@ SOUL.md / AGENTS.md / HEARTBEAT.md / USER.md / TOOLS.md   OpenClaw 智能体定�
 config/openclaw.json     OpenClaw 基础配置（DeepSeek 模型、网关与工具权限收紧；channels 待部署时配置）
 data/                    term / courses / exceptions / user（输入）+ occurrences / reminders（生成）+ outbox/（发送日志，运行时产生）
 skills/                  timetable-import / notice-parser / reminder-composer / course-query / reminder-config（给智能体的操作规程）
-src/                     week_calc / expand / scheduler / sender / timetable_import / notice_parser / ack / weather / query / config_edit（纯标准库）
-scripts/                 run_scheduler（调度入口）/ import_timetable / parse_notice / handle_reply / configure（默认预览，--apply/--send 才生效）/ ask（对话查课表，只读）
-tests/                   核心逻辑 + 导入 + 通知解析 + 发送层 + 回执 + 天气 + 对话查询 + 改配置单元测试（175 个）
+src/                     week_calc / expand / scheduler / sender / timetable_import / notice_parser / ack / weather / query / config_edit / webui（纯标准库）
+scripts/                 run_scheduler（调度入口）/ import_timetable / parse_notice / handle_reply / configure（默认预览，--apply/--send 才生效）/ ask（对话查课表，只读）/ serve_ui（本地 Web 配置 UI）
+ui/                      index.html（配置中心单文件前端，含演示模式，无外部资源）
+tests/                   核心逻辑 + 导入 + 通知解析 + 发送层 + 回执 + 天气 + 对话查询 + 改配置 + Web UI 单元测试（190 个）
 examples/                示例课表（.txt / .csv）
 .env.example             环境变量清单（只有变量名与说明，无真实值）
 ```
@@ -233,7 +257,7 @@ examples/                示例课表（.txt / .csv）
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests        # 175 个，全部本地运行
+python3 -m unittest discover -s tests        # 190 个，全部本地运行
 ```
 发送层测试全部走注入的假 transport / 假 runner 与临时目录，不打真实外网、不动真实 `data/`；
 CLI 端到端测试用临时数据副本验证发送回写、不重发与 dry-run 不落盘。
@@ -245,6 +269,7 @@ CLI 端到端测试用临时数据副本验证发送回写、不重发与 dry-ru
 - 所有改数据的操作默认预览：导入/通知解析要 `--apply`，发送要 `--send`，
   `--dry-run` 永远不写文件；正式写入前自动生成带时间戳的备份。
 - 锚不准不猜：解析器把不确定的字段标“待确认”留空，而不是编造课程、日期或教学楼。
+- Web 配置 UI 只绑本机回环地址且无鉴权：仅限本机使用，不要暴露到局域网或公网。
 
 ## 下一步（TODO）
 

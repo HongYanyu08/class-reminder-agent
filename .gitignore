@@ -11,6 +11,7 @@ __pycache__/
 # data/occurrences.json
 # data/reminders.json
 data/weather_cache.json
+data/*.bak-*
 
 # OS / editor
 .DS_Store
