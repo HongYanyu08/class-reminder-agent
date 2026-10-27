@@ -37,6 +37,85 @@ def find_due(tasks, now_iso):
     now = _parse(now_iso)
     return [t for t in tasks if t["status"] == "pending" and _parse(t["scheduledAt"]) <= now]
 
+# ------------------------------------------------------------ state merge ----
+# run_scheduler regenerates tasks from occurrences on every tick. Runtime
+# state (sent/failed/...) lives only in reminders.json, so regeneration must
+# merge it back in — otherwise a task already sent would flip back to pending
+# and be sent again on the next tick.
+_RUNTIME_FIELDS = ("status", "sentAt", "channel", "error", "retryCount", "lastAttemptAt")
+
+def merge_task_states(generated, existing):
+    """Overlay stored runtime state onto freshly generated tasks (by id).
+    Tasks no longer generated (occurrence gone) are dropped; their history
+    stays in the outbox / gateway logs, not in reminders.json."""
+    old_by_id = {t["id"]: t for t in existing}
+    merged = []
+    for task in generated:
+        old = old_by_id.get(task["id"])
+        if old:
+            for field in _RUNTIME_FIELDS:
+                if field in old:
+                    task[field] = old[field]
+        merged.append(task)
+    return sorted(merged, key=lambda t: t["scheduledAt"])
+
+# --------------------------------------------------------------- dispatch ----
+def dispatch_due(tasks, occurrences_by_id, sender, now_iso, dry_run=False,
+                 message_fn=None, user=None):
+    """Send every due pending task through `sender`, writing the outcome back
+    into the task dicts in place. Returns one result dict per due task.
+
+    Status policy:
+    - success  -> status=sent, sentAt=now, channel=sender.name, error cleared.
+      A sent task is never sent again: find_due only picks up pending tasks
+      and merge_task_states preserves the sent state across regenerations.
+    - failure  -> status=failed, error=<reason>, retryCount += 1,
+      lastAttemptAt=now. Failed tasks are NOT retried automatically by later
+      ticks — a human flips status back to pending to retry. This is
+      deliberate: a broken webhook must not re-spam the user every 5 minutes.
+    - dry_run  -> nothing is sent and no task field is touched.
+    - a due task whose occurrence is missing is failed with a clear error
+      (data inconsistency must surface, not silently vanish).
+    """
+    message_fn = message_fn or compose_message
+    results = []
+    for task in find_due(tasks, now_iso):
+        occ = occurrences_by_id.get(task.get("occurrenceId"))
+        if occ is None:
+            if not dry_run:
+                task["status"] = "failed"
+                task["error"] = f"occurrence 不存在：{task.get('occurrenceId')}"
+                task["retryCount"] = int(task.get("retryCount", 0)) + 1
+                task["lastAttemptAt"] = now_iso
+            results.append({"taskId": task["id"], "type": task.get("type"),
+                            "status": "dry_run" if dry_run else "failed",
+                            "error": f"occurrence 不存在：{task.get('occurrenceId')}"})
+            continue
+        message = message_fn(occ, task["type"])
+        if dry_run:
+            results.append({"taskId": task["id"], "type": task.get("type"),
+                            "status": "dry_run", "message": message})
+            continue
+        try:
+            sender.send(task, message, {"occurrence": occ, "user": user})
+        except Exception as e:  # SenderError or an unexpected channel bug
+            task["status"] = "failed"
+            task["error"] = f"{type(e).__name__}: {e}"
+            task["retryCount"] = int(task.get("retryCount", 0)) + 1
+            task["lastAttemptAt"] = now_iso
+            results.append({"taskId": task["id"], "type": task.get("type"),
+                            "status": "failed", "error": task["error"],
+                            "message": message})
+        else:
+            task["status"] = "sent"
+            task["sentAt"] = now_iso
+            task["channel"] = sender.name
+            task.pop("error", None)
+            results.append({"taskId": task["id"], "type": task.get("type"),
+                            "status": "sent", "channel": sender.name,
+                            "message": message})
+    return results
+
 def compose_message(occ, task_type):
     loc = occ.get("location", {})
     place = "".join(str(loc.get(k, "")) for k in ("building", "room")) or "地点待确认"
