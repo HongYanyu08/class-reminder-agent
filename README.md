@@ -36,7 +36,7 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
 | 调课/停课通知解析 | ✅ 已实现 | 停课→cancel、调课→reschedule、换教室→location_change、改线上→online；只影响单次课，不动周期模板；锚不准拒绝写入 |
 | 周次与展开 | ✅ 已实现 | 教学周、单双周、节假日、调休（makeupDays）；滚动展开未来 14 天 Occurrence 并应用例外 |
 | 提醒调度 | ✅ 已实现 | 三级提醒时刻全部确定性计算；每 tick 重新生成任务并与已存运行状态合并，已发送的永不被重置 |
-| 发送层 | ✅ 已实现 | 可插拔通道 console / outbox / webhook / gateway（见下）；渠道与目标可在 Web UI 的「发送渠道」页配置（存 `data/sender_settings.json`，已 gitignore；环境变量仍优先，见「发送通道」）；成功回写 sent+sentAt+channel，失败回写 failed+error；已 sent 不重发，failed 不自动重试 |
+| 发送层 | ✅ 已实现 | 可插拔通道 console / outbox / webhook / gateway / session（见下）；渠道与目标可在 Web UI 的「发送渠道」页配置（存 `data/sender_settings.json`，已 gitignore；环境变量仍优先，见「发送通道」）；成功回写 sent+sentAt+channel，失败回写 failed+error；已 sent 不重发，failed 不自动重试 |
 | 天气提前量 | ✅ 已实现 | `src/weather.py` 接 Open-Meteo（免费、无需 key）：坐标配了才启用，降雨给 departure 加 `rainExtraMin`（默认 10 分钟）、恶劣天气加 `severeExtraMin`（默认 20 分钟）；预报缓存 3 小时，失败回退过期缓存或不加量，绝不阻塞 tick（见“天气提前量”） |
 | 回执确认 | ✅ 已实现 | `src/ack.py` + `scripts/handle_reply.py`：回复分确认/请假/稍后三类确定性回写（见“处理回执”）；已 sent 超过宽限期（默认 10 分钟）仍未确认的课自动生成一条 follow_up 追问，一次课只追问一次 |
 | 对话查课表 | ✅ 已实现 | `src/query.py` + `scripts/ask.py`：确定性问答——按日期查、按课程查（时间/地点/携带/老师）、下节课、本周概览；答案全部经 `expand()` 计算，例外如实呈现（停课注明、调课按新时间与新地点）；日期锚不准/课程多义返回澄清，绝不猜；只读，不写任何数据（见“对话查课表”） |
@@ -54,7 +54,7 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
    `data/sender_settings.json`，绝不写进仓库任何文件**，清单见 `.env.example`）：
    ```bash
    export DEEPSEEK_API_KEY=你的key      # 只在需要 LLM 解析/文案时用到；确定性脚本不依赖它
-   export REMINDER_CHANNEL=outbox       # 发送通道：console|outbox|webhook|gateway（默认 console）
+   export REMINDER_CHANNEL=outbox       # 发送通道：console|outbox|webhook|gateway|session（默认 console）
    ```
 3. 改 `data/term.json`（开学第一周周一、总周数、假期、调休、节次时间）和
    `data/user.json`（提醒偏好：前晚时间、课前提前量、默认路程/缓冲分钟）。
@@ -223,6 +223,41 @@ export WEATHER_LON=你的经度
 | `outbox` | `outboxDir` / `REMINDER_OUTBOX_DIR`（默认 `<data-dir>/outbox`） | 每条提醒追加一行 JSON 到 `outbox.jsonl`（含 taskId、课程、文案、发送时间），便于本地验证与 OpenClaw 侧消费 |
 | `webhook` | `webhookUrl`（必填）/ `REMINDER_WEBHOOK_URL`；`webhookTimeoutSec` / `REMINDER_WEBHOOK_TIMEOUT`（秒，默认 10） | POST JSON 到该 https URL，载荷含 taskId/type/scheduledAt/message；非 2xx、超时、连不上都算发送失败并记录原因。**URL 只放环境变量或 gitignore 的设置文件，不要写进仓库任何文件** |
 | `gateway` | `gatewayCmd` / `REMINDER_GATEWAY_CMD`（必填，必须含 `{text}`） | 命令模板适配：占位符 `{text}` `{task_id}` `{type}` `{user_id}` 替换后经 shlex 拆分、无 shell 执行，退出码非 0 算失败。本项目的 `config/openclaw.json` 里 `channels` 为空、没有可依据的消息端点约定，所以具体命令要按部署环境的 OpenClaw 版本的通道命令来配，**需要真实 OpenClaw 环境联调**，本仓库不编造其协议 |
+| `session` | 无（在 Web UI「发送渠道」页选 session，或 `REMINDER_CHANNEL=session`） | 主会话投递：到期提醒先排进 `data/session_outbox.jsonl` 并标 `queued`，由 OpenClaw 主会话里的 agent 逐条原样说出后再 `--confirm-sent` 回写 `sent`（两阶段，见下节）。微信 ClawBot 部署用此项 |
+
+### session：主会话投递（微信 ClawBot 部署）
+
+**为什么需要这个通道**：2026-10-27 在用户的 OpenClaw 2026.10.5 + 官方
+openclaw-weixin 插件上实测——裸 `openclaw message send` 命令行发送、隔离会话的
+cron announce 投递，都被 iLink 后端以 `sendMessage ret=-3 invalid arguments`
+拒绝。原因是 iLink 要求每条出站消息携带「入站消息下发的、按账号保存的
+context_token」，而那些路径不带这个令牌；唯一验证可行的主动发送，是 agent
+在**主会话**（微信私聊就路由到它）里自己开口说话，例如心跳唤醒或
+`cron --session main --system-event` 唤醒后 agent 的回复能正常送达微信。
+
+**机制（两阶段，状态诚实，`src/session_dispatch.py`）**：
+
+1. **排队**：`--tick --send` 且通道为 session 时，到期 pending 任务不直接标
+   sent，而是把记录（taskId/occurrenceId/type/scheduledAt/queuedAt/channel/
+   message/courseName）追加到 `data/session_outbox.jsonl`，任务状态置
+   `queued`（写 `queuedAt` 与 `channel="session"`）。queued 不是 sent：
+   follow_up 追问只认 sent，所以没被说出口的提醒不会触发后续逻辑。tick 同时
+   在标准输出打印 `[SESSION-SPEAK] <taskId> <正文>` 行与一条现成的
+   `--confirm-sent` 命令（格式见 HEARTBEAT.md）。
+2. **朗读与确认**：心跳唤醒的 agent 逐条把正文作为独立消息原样发到当前
+   会话（LLM 只朗读、不改字、不参与任何时间计算），全部发完后运行
+   `python3 scripts/run_scheduler.py --confirm-sent <id1,id2,...>`，
+   把这些任务 `queued → sent`（写 `sentAt`）。确认只接受当前为 queued 的
+   id；pending / 未知 / 已 sent 的 id 会逐条报错且不改状态，命令非零退出。
+3. **陈旧重排**：`queuedAt` 距今超过 **15 分钟**（常量
+   `SESSION_REQUEUE_MIN`，在 `src/session_dispatch.py`）仍未确认的 queued
+   任务，下一 tick 先回退为 pending（`note="session requeue"`），并在同一
+   tick 内重新排队、重新朗读——agent 崩溃或会话丢失时提醒最多迟到一个
+   陈旧周期，不会静默丢失；代价是极少数情况下用户可能收到一条重复提醒。
+
+`data/session_outbox.jsonl` 与 outbox 的 `outbox.jsonl` 并列：前者是
+session 通道的排队审计日志（谁在何时被排队、等 agent 朗读），后者本身
+就是终局投递记录；session 通道的真正送达证据是任务回写 sent + sentAt。
 
 ### 接入微信（诚实版）
 

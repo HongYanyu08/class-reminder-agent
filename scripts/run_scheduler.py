@@ -10,8 +10,18 @@ Usage:
       # (sent/failed) back into reminders.json
   python3 scripts/run_scheduler.py --tick --send --dry-run
       # preview only, guaranteed: nothing sent, no file written at all
+  python3 scripts/run_scheduler.py --confirm-sent <id1,id2,...>
+      # session channel phase 2: after the agent in the OpenClaw main
+      # session has spoken the queued reminders aloud, flip exactly
+      # those queued tasks to sent (standalone mode, never with --tick)
 
-Channels (src/sender.py): console (default) / outbox / webhook / gateway.
+Channels (src/sender.py): console (default) / outbox / webhook / gateway /
+session. The session channel is two-phase (src/session_dispatch.py):
+--tick --send only queues due reminders into session_outbox.jsonl
+(status queued) and prints [SESSION-SPEAK] lines for the heartbeat agent
+to read aloud verbatim; --confirm-sent then marks them sent. Queued
+tasks left unconfirmed for over 15 minutes fall back to pending and are
+re-queued on the next tick.
 Configuration resolves in src/sender_settings.py: --channel flag >
 REMINDER_* env vars > data/sender_settings.json (the file maintained by
 the Web UI's 发送渠道 page; gitignored because the webhook URL is a
@@ -36,6 +46,8 @@ from src.scheduler import generate_reminders, find_due, compose_message, \
     merge_task_states, dispatch_due, generate_follow_ups, reactivate_snoozed, \
     DEFAULT_FOLLOWUP_GRACE_MIN
 from src.sender import build_sender, SenderConfigError
+from src.session_dispatch import queue_due_for_session, confirm_session_sent, \
+    requeue_stale_session_tasks, SESSION_REQUEUE_MIN
 from src.weather import build_weather_provider
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,6 +57,30 @@ def load(data, name):
 
 def save(data, name, obj):
     (data / name).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def confirm_sent_mode(data, ids_arg, now):
+    """--confirm-sent: flip queued session tasks to sent (phase 2 of the
+    session channel). Only currently-queued ids are confirmed; anything
+    else is reported and left untouched. Exit 0 when every id confirmed,
+    1 otherwise (including a missing reminders.json or an empty id list).
+    """
+    if not (data / "reminders.json").exists():
+        print("[确认失败] reminders.json 不存在，没有可确认的任务。", file=sys.stderr)
+        return 1
+    ids = [s.strip() for s in ids_arg.split(",") if s.strip()]
+    if not ids:
+        print("[确认失败] 没有给出任何任务 id。", file=sys.stderr)
+        return 1
+    tasks = load(data, "reminders.json")
+    confirmed, problems = confirm_session_sent(tasks, ids, now)
+    if confirmed:
+        save(data, "reminders.json", tasks)
+    for task_id in confirmed:
+        print(f"[CONFIRMED] {task_id}")
+    for problem in problems:
+        print(f"[确认失败] {problem}", file=sys.stderr)
+    print(f"[确认完成] 已确认 {len(confirmed)} 条，问题 {len(problems)} 条。")
+    return 1 if problems else 0
 
 def main():
     ap = argparse.ArgumentParser()
@@ -58,11 +94,21 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="preview only: send nothing and write no files (wins over --send)")
     ap.add_argument("--channel", default=None,
-                    help="console|outbox|webhook|gateway (default: REMINDER_CHANNEL env or console)")
+                    help="console|outbox|webhook|gateway|session (default: REMINDER_CHANNEL env or console)")
+    ap.add_argument("--confirm-sent", default=None, metavar="IDS",
+                    help="session 通道第二阶段：把逗号分隔的 queued 任务 id 确认为已发送"
+                         "（独立模式，不能与 --tick/--expand 同用）")
     ap.add_argument("--data-dir", default=str(ROOT / "data"))
     args = ap.parse_args()
 
     data = Path(args.data_dir)
+    if args.confirm_sent is not None:
+        if args.tick or args.expand:
+            print("[参数错误] --confirm-sent 是独立模式，不能与 --tick/--expand 同时使用。",
+                  file=sys.stderr)
+            return 2
+        now = args.now or datetime.now().astimezone().isoformat()
+        return confirm_sent_mode(data, args.confirm_sent, now)
     dry_run = args.dry_run or not args.send
 
     term, courses = load(data, "term.json"), load(data, "courses.json")
@@ -128,6 +174,31 @@ def main():
     except SenderConfigError as e:
         print(f"[发送中止] 通道配置错误：{e}", file=sys.stderr)
         return 2
+
+    if sender.name == "session":
+        # Two-phase session delivery (src/session_dispatch.py): stale
+        # queued tasks fall back to pending first, then due tasks are
+        # queued into session_outbox.jsonl for the heartbeat agent to
+        # speak. Nothing here counts as sent yet.
+        requeued = requeue_stale_session_tasks(tasks, now)
+        if requeued:
+            print(f"[会话重排] {requeued} 条 queued 超过 {SESSION_REQUEUE_MIN} 分钟未确认，"
+                  "已回退 pending 并在本 tick 重新排队。")
+        results = queue_due_for_session(tasks, by_id, sender, now, user=user)
+        save(data, "reminders.json", tasks)  # write back queued/failed outcomes
+        queued = [r for r in results if r["status"] == "queued"]
+        failed = [r for r in results if r["status"] == "failed"]
+        for r in failed:
+            print(f"[FAILED] {r['type']} {r.get('message', '')} — {r['error']}")
+        if queued:
+            print(f"[SESSION-OUTBOX] 以下 {len(queued)} 条提醒需要你逐条作为独立消息发送到当前会话，不要改动文字：")
+            for r in queued:
+                print(f"[SESSION-SPEAK] {r['taskId']} {r['message']}")
+            print("全部发送后运行：python3 scripts/run_scheduler.py --confirm-sent "
+                  + ",".join(r["taskId"] for r in queued))
+        print(f"[发送完成] 通道 session：已排队 {len(queued)} 条，失败 {len(failed)} 条。"
+              + ("失败任务不会自动重试，处理后把 reminders.json 里对应 status 改回 pending 再跑。" if failed else ""))
+        return 1 if failed else 0
 
     results = dispatch_due(tasks, by_id, sender, now, user=user)
     save(data, "reminders.json", tasks)  # write back sent/failed outcomes

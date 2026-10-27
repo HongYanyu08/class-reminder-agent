@@ -74,7 +74,7 @@ def find_due(tasks, now_iso):
 # state (sent/failed/...) lives only in reminders.json, so regeneration must
 # merge it back in — otherwise a task already sent would flip back to pending
 # and be sent again on the next tick.
-_RUNTIME_FIELDS = ("status", "sentAt", "channel", "error", "retryCount", "lastAttemptAt",
+_RUNTIME_FIELDS = ("status", "sentAt", "queuedAt", "channel", "error", "retryCount", "lastAttemptAt",
                    "acknowledgedAt", "snoozedAt", "snoozeUntil", "resumedAt",
                    "reply", "note", "cancelledAt", "cancelReason")
 

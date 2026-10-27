@@ -16,6 +16,15 @@ Pluggable channels:
            actual command must come from the deployment's OpenClaw version
            and is only integration-tested against a real OpenClaw install.
            Nothing about that external CLI is invented here.
+  session  queue the message into <data-dir>/session_outbox.jsonl for the
+           agent running in the OpenClaw MAIN session to speak aloud in
+           the current conversation (the WeChat ClawBot deployment path:
+           iLink only accepts outbound messages that carry the context
+           token of an inbound message, so only the in-session agent can
+           actually deliver — see src/session_dispatch.py and the README
+           发送通道 session 小节). Queueing is NOT sending: the task goes
+           to status "queued" and only becomes "sent" when the agent
+           confirms via run_scheduler.py --confirm-sent after speaking.
 
 Where the channel and its secrets come from is resolved by
 src/sender_settings.py, in this order (highest first):
@@ -39,7 +48,7 @@ import json, os, shlex, subprocess, sys, urllib.error, urllib.request
 from datetime import datetime
 from pathlib import Path
 
-CHANNELS = ("console", "outbox", "webhook", "gateway")
+CHANNELS = ("console", "outbox", "webhook", "gateway", "session")
 
 
 class SenderError(Exception):
@@ -84,6 +93,41 @@ class OutboxSender:
             "taskId": task["id"], "occurrenceId": task.get("occurrenceId"),
             "type": task.get("type"), "scheduledAt": task.get("scheduledAt"),
             "sentAt": _now_iso(), "channel": self.name, "message": message,
+            "courseName": (context.get("occurrence") or {}).get("courseName"),
+        }
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return {"detail": str(self.path)}
+
+
+class SessionSender:
+    """主会话投递：只把消息排进 session_outbox.jsonl，不直接送达。
+
+    The actual delivery is done by the agent in the OpenClaw main session
+    (heartbeat wake): it speaks each queued message verbatim into the
+    current conversation, then confirms with --confirm-sent, which flips
+    the task queued -> sent (src/session_dispatch.py). send() therefore
+    means "queued for the agent", and its record mirrors OutboxSender's
+    but stamps queuedAt instead of sentAt — the two-phase state stays
+    honest: nothing is marked sent before a human-visible message exists.
+    """
+    name = "session"
+    FILENAME = "session_outbox.jsonl"
+
+    def __init__(self, data_dir):
+        self.dir = Path(data_dir)
+
+    @property
+    def path(self):
+        return self.dir / self.FILENAME
+
+    def send(self, task, message, context=None):
+        context = context or {}
+        self.dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "taskId": task["id"], "occurrenceId": task.get("occurrenceId"),
+            "type": task.get("type"), "scheduledAt": task.get("scheduledAt"),
+            "queuedAt": _now_iso(), "channel": self.name, "message": message,
             "courseName": (context.get("occurrence") or {}).get("courseName"),
         }
         with self.path.open("a", encoding="utf-8") as f:

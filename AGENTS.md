@@ -7,6 +7,7 @@
 1. 用户输入（文字/图片/通知转发）→ 对应 Skill 解析 → 写入 data/*.json（需用户确认）
 2. HEARTBEAT 唤醒 → scripts/run_scheduler.py --tick
    → expand 展开未来 14 天 Occurrence → scheduler 生成 ReminderTask → 到期发送
+   （session 主会话投递通道是两阶段的：tick 只把到期提醒排进 data/session_outbox.jsonl 并标 queued，agent 在当前会话逐条原样说出后用 --confirm-sent 才回写 sent，未确认超 15 分钟的 queued 自动回退 pending 重排）
 3. 用户回复“收到/请假了/ snooze 10分钟”→ scripts/handle_reply.py（src/ack.py 确定性
    解析+定位，默认预览、--apply 才回写）→ 更新对应那次课的 ReminderTask 状态
    （acknowledged / snoozed，请假时同次课未发的任务转 cancelled）；已发送未确认

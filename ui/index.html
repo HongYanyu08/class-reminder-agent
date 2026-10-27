@@ -321,6 +321,7 @@
                 <option value="outbox">发件箱文件（outbox.jsonl）</option>
                 <option value="webhook">Webhook 中转（可推到微信）</option>
                 <option value="gateway">OpenClaw 网关命令</option>
+                <option value="session">主会话投递（OpenClaw agent 朗读发送）</option>
               </select>
               <small>先选通道，下面会出现对应的设置项。</small>
             </div>
@@ -348,6 +349,12 @@
               <textarea id="senderGatewayCmd" autocomplete="off" spellcheck="false"
                 placeholder="例如：openclaw-send --user {user_id} --text {text}"></textarea>
               <small>占位符：{text} 提醒正文（必填）、{task_id}、{type}、{user_id}。命令由你部署的 OpenClaw 提供，保存前请确认命令本身可用。已保存的命令只显示打码版，保持原样保存不会覆盖。</small>
+            </div>
+          </div>
+
+          <div id="senderSessionGroup" class="channel-group subsection">
+            <div class="field">
+              <p style="margin:0">主会话投递不需要填任何东西：到期提醒先排进 <code>data/session_outbox.jsonl</code>（状态 queued），再由 OpenClaw 主会话里的 agent 在心跳时逐条原样说到当前会话，说完用 <code>--confirm-sent</code> 回写为 sent。<strong>微信 ClawBot 部署就用这一项</strong>——iLink 只接受带入站上下文令牌的出站消息，裸的发送命令会被拒绝（ret=-3），只有主会话里的 agent 亲口发才送得出去。</p>
             </div>
           </div>
 
@@ -554,7 +561,8 @@ const CHANNEL_LABELS = {
   console: '控制台（只打印）',
   outbox: '发件箱文件',
   webhook: 'Webhook 中转',
-  gateway: 'OpenClaw 网关命令'
+  gateway: 'OpenClaw 网关命令',
+  session: '主会话投递'
 };
 const SOURCE_LABELS = {
   argument: '命令行参数', env: '环境变量', settings: '本页设置文件', default: '默认值',
@@ -564,7 +572,7 @@ const SOURCE_LABELS = {
 function buildDemoSender() {
   return {
     ok: true,
-    channels: ['console', 'outbox', 'webhook', 'gateway'],
+    channels: ['console', 'outbox', 'webhook', 'gateway', 'session'],
     effective: {
       channel: 'webhook',
       webhookUrlMasked: 'https://qyapi.weixin.qq.com/…a1b2',
@@ -613,6 +621,7 @@ function updateSenderGroups() {
   document.getElementById('senderWebhookGroup').classList.toggle('visible', channel === 'webhook');
   document.getElementById('senderGatewayGroup').classList.toggle('visible', channel === 'gateway');
   document.getElementById('senderOutboxGroup').classList.toggle('visible', channel === 'outbox');
+  document.getElementById('senderSessionGroup').classList.toggle('visible', channel === 'session');
 }
 
 function renderSender() {
@@ -635,6 +644,9 @@ function renderSender() {
   }
   if (eff.channel === 'outbox') {
     text += ' · 目录：' + (eff.outboxDir || 'data/outbox（默认）');
+  }
+  if (eff.channel === 'session') {
+    text += ' · 提醒排进 data/session_outbox.jsonl，由 OpenClaw 主会话里的 agent 朗读发送（微信 ClawBot 部署用此项）';
   }
   const envFields = Object.keys(sources).filter(field => sources[field] === 'env');
   if (envFields.length) {

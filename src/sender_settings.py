@@ -310,5 +310,10 @@ def build_sender_from_config(config, sources=None, data_dir=None,
                                      timeout=timeout, transport=transport)
     if channel == "gateway":
         return _sender.GatewaySender(config.get("gatewayCmd"))
+    if channel == "session":
+        # No settings field of its own: the session outbox lives directly
+        # in the data dir (session_outbox.jsonl), next to reminders.json.
+        base = Path(data_dir) if data_dir else _default_data_dir()
+        return _sender.SessionSender(base)
     raise SenderConfigError(
         f"未知发送通道 {channel!r}，可用通道：{', '.join(CHANNELS)}")
