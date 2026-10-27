@@ -162,6 +162,19 @@
     line-height: 1.55; font-weight: 700;
   }
   .empty { color: var(--muted); line-height: 1.6; }
+  .import-table-wrap { overflow-x: auto; margin-top: 16px; }
+  table.import-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .import-table th, .import-table td {
+    text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line);
+    vertical-align: top; line-height: 1.5;
+  }
+  .import-table th { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .import-table tr.issue-row td { background: var(--amber-soft); }
+  .issue-list { margin: 0; padding-left: 16px; color: var(--amber); font-weight: 700; line-height: 1.55; }
+  input[type="file"] {
+    width: 100%; border: 1px dashed var(--line); border-radius: 12px;
+    padding: 12px 13px; background: #fbfcfe; color: var(--ink);
+  }
   .loading { padding: 34px; text-align: center; color: var(--muted); }
   .footer-note { margin-top: 18px; color: var(--muted); font-size: 13px; line-height: 1.65; text-align: center; }
   @media (max-width: 900px) {
@@ -205,6 +218,7 @@
     <button class="tab" type="button" data-tab="courses">单课覆盖</button>
     <button class="tab" type="button" data-tab="upcoming">未来课程</button>
     <button class="tab" type="button" data-tab="sender">发送渠道</button>
+    <button class="tab" type="button" data-tab="import">导入课表</button>
   </nav>
 
   <section id="panel-overview" class="panel active">
@@ -375,6 +389,41 @@
           <p class="section-intro" style="margin-top:12px">「发送测试消息」用当前页面上填的设置（草稿，不先保存）发一条固定测试文案，通不通当场见分晓；失败会显示具体原因。测试不会改动已保存的设置。</p>
         </fieldset>
       </form>
+    </div>
+  </section>
+
+  <section id="panel-import" class="panel">
+    <div class="card">
+      <h2>导入课表</h2>
+      <p class="section-intro">两种方式任选：上传课表文件（.txt / .csv / .xlsx / .json，最大 2 MB），或者把课表截图转成的文字直接粘贴进来。先点「预览解析」核对，确认无误再点「确认导入」——和命令行导入一样，没点确认之前不会写入任何文件，写入前会自动备份。</p>
+
+      <div class="info-box">
+        <strong>关于「待确认」：</strong>识别不准的字段（教室、教师、周次等）会被标成待确认，系统绝不猜。和命令行导入的行为一致：带待确认的课程会<strong>照常导入</strong>，待确认字段留空、不会被编造填充，预览里会逐条高亮列出，导入后请核对修正。
+      </div>
+
+      <form id="importForm" style="margin-top:16px">
+        <fieldset id="importFieldset">
+          <div class="form-grid">
+            <div class="field" style="grid-column: 1 / -1">
+              <label for="importFile">方式一：选择课表文件</label>
+              <input id="importFile" type="file" accept=".txt,.csv,.xlsx,.json">
+              <small id="importFileHint">支持 .txt / .csv / .xlsx / .json，最大 2 MB。选了文件就以文件为准（与粘贴文字二选一）。</small>
+            </div>
+            <div class="field" style="grid-column: 1 / -1">
+              <label for="importText">方式二：粘贴课表文字</label>
+              <textarea id="importText" rows="6" spellcheck="false" placeholder="一行一门课，例如：&#10;高等数学 周一 第1-2节 1-17周(单) 教三301 王老师 带:课本、习题册&#10;大学英语 周三 第3-4节 1-16周 外语楼205 李老师"></textarea>
+              <small>课表截图先让智能体转成文字，再把文字粘到这里。</small>
+            </div>
+          </div>
+          <div class="actions">
+            <button id="previewImportBtn" class="primary" type="button">预览解析</button>
+            <button id="applyImportBtn" class="primary" type="button" disabled>确认导入</button>
+            <button id="clearImportBtn" class="secondary" type="button">清空</button>
+            <div id="importStatus" class="status" role="status" aria-live="polite"></div>
+          </div>
+        </fieldset>
+      </form>
+      <div id="importResult"></div>
     </div>
   </section>
 
@@ -761,6 +810,354 @@ async function testSender() {
   }
 }
 
+// ---------------------------------------------------------- 导入课表 ----
+let importPayload = null;   // 上一次成功预览的原始入参（确认导入时原样重发）
+let importParsed = null;    // 演示模式下上一次预览的解析结果
+
+// 演示模式选文件时用的固定解析结果（即 examples/sample_timetable.txt
+// 在真实解析器下的结果），形状与服务端 preview 返回的 courses 一致。
+const DEMO_IMPORT_FILE_RESULT = [
+  {
+    id: 'demo_imp_math', name: '高等数学', teacher: '王老师', weekday: 1,
+    sections: { start: 1, end: 2 }, startTime: '08:00', endTime: '09:40',
+    weeks: { mode: 'odd', startWeek: 1, endWeek: 17 },
+    location: { campus: '', building: '教三', room: '301' },
+    requiredItems: ['课本', '习题册'], reminderOverride: {}, _issues: []
+  },
+  {
+    id: 'demo_imp_linalg', name: '线性代数', teacher: '赵老师', weekday: 2,
+    sections: { start: 3, end: 4 }, startTime: '10:00', endTime: '11:40',
+    weeks: { mode: 'even', startWeek: 2, endWeek: 18 },
+    location: { campus: '', building: '教一', room: '102' },
+    requiredItems: [], reminderOverride: {}, _issues: []
+  },
+  {
+    id: 'demo_imp_phys', name: '大学物理', teacher: '', weekday: 4,
+    sections: { start: 5, end: 6 }, startTime: '14:00', endTime: '15:40',
+    weeks: { mode: 'range', startWeek: 1, endWeek: 16 },
+    location: { campus: '', building: '实验楼', room: '203' },
+    requiredItems: [], reminderOverride: {}, _issues: ['教师待确认']
+  },
+  {
+    id: 'demo_imp_pe', name: '体育', teacher: '', weekday: 5,
+    sections: { start: 7, end: 7 }, startTime: '16:00', endTime: '16:45',
+    weeks: { mode: 'list', list: [1, 3, 5, 7, 9] },
+    location: { campus: '', building: '体育馆', room: '' },
+    requiredItems: [], reminderOverride: {},
+    _issues: ['教师待确认', '教室号待确认']
+  },
+  {
+    id: 'demo_imp_ai', name: '人工智能导论', teacher: '刘老师', weekday: 3,
+    sections: null, startTime: '19:00', endTime: '20:40',
+    weeks: { mode: 'range', startWeek: 1, endWeek: 12 },
+    location: { campus: '', building: '', room: '线上' },
+    requiredItems: [], reminderOverride: {}, _issues: ['节次待确认']
+  }
+];
+
+function importDedupeKey(course) {
+  const s = (course && course.sections) || {};
+  return [course.name, course.weekday, s.start, s.end,
+    JSON.stringify(course.weeks || {})].join('|');
+}
+
+function demoParseText(text) {
+  // 演示模式的简化行解析：只为展示预览效果，真实解析在服务端完成。
+  const weekdayMap = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 };
+  const demoTimes = {
+    1: ['08:00', '08:45'], 2: ['08:55', '09:40'], 3: ['10:00', '10:45'],
+    4: ['10:55', '11:40'], 5: ['14:00', '14:45'], 6: ['14:55', '15:40'],
+    7: ['16:00', '16:45'], 8: ['16:55', '17:40']
+  };
+  const out = [];
+  String(text).split('\n').forEach(rawLine => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) return;
+    const issues = [];
+    let rest = line;
+    const take = re => {
+      const m = rest.match(re);
+      if (m) rest = (rest.slice(0, m.index) + ' ' + rest.slice(m.index + m[0].length)).trim();
+      return m;
+    };
+    let items = [];
+    let m = take(/(?:带|携带物品)[:：]?\s*([^\s;；|]+(?:[、,，][^\s;；|]+)*)/);
+    if (m) items = m[1].split(/[、,，]/).filter(Boolean);
+    let teacher = '';
+    m = take(/([一-龥]{1,3}老师)/);
+    if (m) teacher = m[1]; else issues.push('教师待确认');
+    let startTime = '', endTime = '';
+    m = take(/(\d{1,2}:\d{2})\s*[-~—]\s*(\d{1,2}:\d{2})/);
+    if (m) { startTime = m[1].padStart(5, '0'); endTime = m[2].padStart(5, '0'); }
+    let weeks = null;
+    m = take(/第?\s*(\d+)\s*[-~—]\s*(\d+)\s*周\s*[\(（]?\s*(单|双)?\s*[\)）]?\s*(?:周)?/);
+    if (m) {
+      const mode = m[3] === '单' ? 'odd' : m[3] === '双' ? 'even' : 'range';
+      weeks = { mode, startWeek: Number(m[1]), endWeek: Number(m[2]) };
+    } else {
+      m = take(/((?:\d+\s*[,、，]\s*)+\d+)\s*周/);
+      if (m) weeks = { mode: 'list', list: m[1].split(/[,、，]/).map(x => Number(x.trim())) };
+    }
+    if (!weeks) { weeks = { mode: 'all', startWeek: 1, endWeek: 18 }; issues.push('周次待确认'); }
+    let weekday = null;
+    m = take(/(?:周|星期)([一二三四五六日天])/);
+    if (m) weekday = weekdayMap[m[1]]; else issues.push('星期待确认');
+    let sections = null;
+    m = take(/第?\s*(\d+)\s*[-~、,，]\s*(\d+)\s*节/) || take(/第?\s*(\d+)\s*节/);
+    if (m) sections = { start: Number(m[1]), end: Number(m[m.length - 1]) };
+    if (!startTime && sections && demoTimes[sections.start] && demoTimes[sections.end]) {
+      startTime = demoTimes[sections.start][0];
+      endTime = demoTimes[sections.end][1];
+    }
+    if (!startTime) issues.push('上课时间待确认');
+    if (!sections) issues.push('节次待确认');
+    const parts = rest.split(/[\s;；|]+/).filter(Boolean);
+    const name = parts[0] || '';
+    if (!name) issues.push('课程名待确认');
+    let location = { campus: '', building: '', room: '' };
+    const locRaw = parts[1] || '';
+    if (!locRaw) issues.push('地点待确认');
+    else if (locRaw.indexOf('线上') !== -1 || locRaw.indexOf('在线') !== -1) {
+      location = { campus: '', building: '', room: '线上' };
+    } else {
+      const lm = locRaw.match(/^(.+?)(\d{2,4}\s*[A-Za-z]?)$/);
+      if (lm) location = { campus: '', building: lm[1], room: lm[2].replace(/\s/g, '') };
+      else { location = { campus: '', building: locRaw, room: '' }; issues.push('教室号待确认'); }
+    }
+    out.push({
+      id: 'demo_imp_' + out.length, name, teacher, location, weekday, sections,
+      startTime, endTime, weeks, requiredItems: items, reminderOverride: {},
+      _issues: issues
+    });
+  });
+  return out;
+}
+
+function demoImportSummary(courses) {
+  const seen = new Set((appState.courses || []).map(importDedupeKey));
+  const duplicateNames = [];
+  let willAdd = 0;
+  courses.forEach(course => {
+    const key = importDedupeKey(course);
+    if (seen.has(key)) duplicateNames.push(course.name || '');
+    else { seen.add(key); willAdd += 1; }
+  });
+  return {
+    total: courses.length,
+    withIssues: courses.filter(c => (c._issues || []).length).length,
+    issueCount: courses.reduce((n, c) => n + (c._issues || []).length, 0),
+    willAdd,
+    duplicates: duplicateNames.length,
+    duplicateNames
+  };
+}
+
+async function collectImportPayload() {
+  const fileInput = document.getElementById('importFile');
+  const file = fileInput.files && fileInput.files[0];
+  if (file) {
+    if (file.size > 2 * 1024 * 1024) {
+      throw new Error('文件超过 2 MB 上限，请换小一点的文件');
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('读取文件失败，请重试'));
+      reader.readAsDataURL(file);
+    });
+    const base64 = String(dataUrl).split(',', 2)[1] || '';
+    if (!base64) throw new Error('读取文件失败，请重试');
+    return { filename: file.name, contentBase64: base64 };
+  }
+  const text = document.getElementById('importText').value;
+  if (text.trim()) return { text };
+  throw new Error('先选择一个课表文件，或把课表文字粘贴到文本框里');
+}
+
+function weeksText(weeks) {
+  if (!weeks) return '待确认';
+  if (weeks.mode === 'all') return '全学期';
+  if (weeks.mode === 'odd') return '第 ' + weeks.startWeek + '–' + weeks.endWeek + ' 周（单）';
+  if (weeks.mode === 'even') return '第 ' + weeks.startWeek + '–' + weeks.endWeek + ' 周（双）';
+  if (weeks.mode === 'list') return '第 ' + (weeks.list || []).join(', ') + ' 周';
+  return '第 ' + weeks.startWeek + '–' + weeks.endWeek + ' 周';
+}
+
+function renderImportResult(courses, summary) {
+  const root = document.getElementById('importResult');
+  clear(root);
+  const summaryLine = element('p', 'section-intro',
+    '共解析 ' + summary.total + ' 门课：预计新增 ' + summary.willAdd +
+    ' 门、与现有课表重复 ' + summary.duplicates + ' 门' +
+    (summary.duplicateNames && summary.duplicateNames.length
+      ? '（' + summary.duplicateNames.join('、') + '）' : '') +
+    '；其中 ' + summary.withIssues + ' 门带待确认（共 ' + summary.issueCount +
+    ' 项），已在下表高亮——带待确认的课程会照常导入，相应字段留空，导入后请核对修正。');
+  summaryLine.style.marginTop = '18px';
+  root.appendChild(summaryLine);
+
+  const wrap = element('div', 'import-table-wrap');
+  const table = element('table', 'import-table');
+  const head = document.createElement('tr');
+  ['课程', '星期', '节次', '时间', '周次', '地点', '教师', '携带物品', '状态'].forEach(label => {
+    head.appendChild(element('th', '', label));
+  });
+  table.appendChild(head);
+  courses.forEach(course => {
+    const issues = course._issues || [];
+    const row = document.createElement('tr');
+    if (issues.length) row.className = 'issue-row';
+    const weekday = course.weekday ? WEEKDAYS[course.weekday - 1] : '待确认';
+    const sections = course.sections
+      ? '第 ' + course.sections.start + '–' + course.sections.end + ' 节' : '待确认';
+    const time = course.startTime
+      ? course.startTime + '–' + course.endTime : '待确认';
+    row.appendChild(element('td', '', course.name || '（课程名待确认）'));
+    row.appendChild(element('td', '', weekday));
+    row.appendChild(element('td', '', sections));
+    row.appendChild(element('td', '', time));
+    row.appendChild(element('td', '', weeksText(course.weeks)));
+    row.appendChild(element('td', '', locationText(course.location)));
+    row.appendChild(element('td', '', course.teacher || '待确认'));
+    row.appendChild(element('td', '', (course.requiredItems || []).join('、') || '无'));
+    const statusCell = document.createElement('td');
+    if (issues.length) {
+      const list = element('ul', 'issue-list');
+      issues.forEach(issue => list.appendChild(element('li', '', issue)));
+      statusCell.appendChild(list);
+    } else {
+      statusCell.appendChild(element('span', 'chip green', '完整'));
+    }
+    row.appendChild(statusCell);
+    table.appendChild(row);
+  });
+  wrap.appendChild(table);
+  root.appendChild(wrap);
+}
+
+function invalidateImportPreview() {
+  if (!importPayload) return;
+  importPayload = null;
+  importParsed = null;
+  document.getElementById('applyImportBtn').disabled = true;
+  setStatus(document.getElementById('importStatus'), '内容已变化，请重新点「预览解析」。');
+}
+
+async function previewImport() {
+  const status = document.getElementById('importStatus');
+  const previewBtn = document.getElementById('previewImportBtn');
+  const applyBtn = document.getElementById('applyImportBtn');
+  const fieldset = document.getElementById('importFieldset');
+  previewBtn.disabled = true;
+  applyBtn.disabled = true;
+  fieldset.disabled = true;
+  setStatus(status, demoMode ? '正在用演示解析…' : '正在解析…');
+  try {
+    const payload = await collectImportPayload();
+    let data;
+    if (demoMode) {
+      const courses = payload.text !== undefined
+        ? demoParseText(payload.text)
+        : clone(DEMO_IMPORT_FILE_RESULT);
+      if (!courses.length) {
+        throw new Error('没有解析出任何课程：请确认内容是「每行一门课」的文字');
+      }
+      data = { courses, summary: demoImportSummary(courses) };
+      importParsed = courses;
+    } else {
+      data = await postJSON('/api/import/preview', payload);
+    }
+    importPayload = payload;
+    renderImportResult(data.courses, data.summary);
+    applyBtn.disabled = false;
+    setStatus(status,
+      '预览完成：共 ' + data.summary.total + ' 门，预计新增 ' + data.summary.willAdd +
+      ' 门、跳过重复 ' + data.summary.duplicates + ' 门。核对无误后点「确认导入」。',
+      'success');
+  } catch (error) {
+    importPayload = null;
+    importParsed = null;
+    setStatus(status, error.message || '解析失败', 'error');
+  } finally {
+    previewBtn.disabled = false;
+    fieldset.disabled = false;
+  }
+}
+
+async function applyImport() {
+  const status = document.getElementById('importStatus');
+  const previewBtn = document.getElementById('previewImportBtn');
+  const applyBtn = document.getElementById('applyImportBtn');
+  const fieldset = document.getElementById('importFieldset');
+  if (!importPayload) {
+    setStatus(status, '请先点「预览解析」，核对结果后再确认导入。', 'error');
+    return;
+  }
+  previewBtn.disabled = true;
+  applyBtn.disabled = true;
+  fieldset.disabled = true;
+  setStatus(status, demoMode ? '正在更新演示数据…' : '正在导入…');
+  try {
+    if (demoMode) {
+      const seen = new Set((appState.courses || []).map(importDedupeKey));
+      let added = 0;
+      let skipped = 0;
+      (importParsed || []).forEach(parsed => {
+        const key = importDedupeKey(parsed);
+        if (seen.has(key)) { skipped += 1; return; }
+        seen.add(key);
+        const course = clone(parsed);
+        delete course._issues;
+        course.weekdayLabel = course.weekday ? WEEKDAYS[course.weekday - 1] : '';
+        course.reminderOverride = { departureLeadMin: null, disabledTypes: [] };
+        course.typeStates = withTypeStates(course.reminderOverride).typeStates;
+        appState.courses.push(course);
+        added += 1;
+      });
+      if (appState.summary) appState.summary.courseCount = appState.courses.length;
+      renderCourses();
+      renderOverview();
+      setStatus(status,
+        '演示模式不会写入文件：本次新增 ' + added + ' 门、跳过重复 ' + skipped +
+        ' 门，只在本页演示数据里生效。', 'success');
+    } else {
+      const result = await postJSON('/api/import/apply', importPayload);
+      if (Array.isArray(result.courses)) {
+        appState.courses = result.courses;
+        if (appState.summary) appState.summary.courseCount = result.total;
+        renderCourses();
+        renderOverview();
+      }
+      const backupText = result.backup
+        ? '原文件已备份为：' + result.backup + '。'
+        : '没有新增课程，未改动任何文件。';
+      setStatus(status,
+        '导入完成：新增 ' + result.added + ' 门、跳过重复 ' +
+        result.skippedDuplicates + ' 门，现有共 ' + result.total + ' 门。' +
+        backupText, 'success');
+    }
+    importPayload = null;
+    importParsed = null;
+  } catch (error) {
+    setStatus(status, error.message || '导入失败', 'error');
+  } finally {
+    previewBtn.disabled = false;
+    fieldset.disabled = false;
+  }
+}
+
+function clearImport() {
+  document.getElementById('importFile').value = '';
+  document.getElementById('importText').value = '';
+  document.getElementById('importFileHint').textContent =
+    '支持 .txt / .csv / .xlsx / .json，最大 2 MB。选了文件就以文件为准（与粘贴文字二选一）。';
+  clear(document.getElementById('importResult'));
+  importPayload = null;
+  importParsed = null;
+  document.getElementById('applyImportBtn').disabled = true;
+  setStatus(document.getElementById('importStatus'), '');
+}
+
 async function fetchState() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2500);
@@ -1132,6 +1529,17 @@ document.getElementById('globalForm').addEventListener('submit', saveGlobal);
 document.getElementById('senderForm').addEventListener('submit', saveSender);
 document.getElementById('testSenderBtn').addEventListener('click', testSender);
 document.getElementById('senderChannel').addEventListener('change', updateSenderGroups);
+document.getElementById('previewImportBtn').addEventListener('click', previewImport);
+document.getElementById('applyImportBtn').addEventListener('click', applyImport);
+document.getElementById('clearImportBtn').addEventListener('click', clearImport);
+document.getElementById('importText').addEventListener('input', invalidateImportPreview);
+document.getElementById('importFile').addEventListener('change', event => {
+  const file = event.target.files && event.target.files[0];
+  document.getElementById('importFileHint').textContent = file
+    ? '已选择：' + file.name + '（' + Math.max(1, Math.round(file.size / 1024)) + ' KB）。点「预览解析」查看解析结果。'
+    : '支持 .txt / .csv / .xlsx / .json，最大 2 MB。选了文件就以文件为准（与粘贴文字二选一）。';
+  invalidateImportPreview();
+});
 document.getElementById('reloadBtn').addEventListener('click', () => {
   setStatus(document.getElementById('globalStatus'), '正在重新读取…');
   loadState().then(() => {

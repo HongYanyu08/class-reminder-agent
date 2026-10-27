@@ -18,11 +18,22 @@ Safety model:
   command: only masked renderings (src/sender_settings.py). A submitted
   masked/empty secret keeps the stored value, so the masked display can
   round-trip through the form without destroying the real secret.
+- The 导入课表 endpoints reuse the deterministic parser in
+  src/timetable_import.py and mirror scripts/import_timetable.py:
+  preview parses only and never writes; apply re-parses the same raw
+  input (deterministic, so identical to the preview — no server-side
+  session state), then writes with a backup and the CLI's dedupe key.
+  Courses flagged "_issues" are imported exactly like the CLI does:
+  flagged fields stay blank (never guessed) and "_issues" itself is
+  stripped from the stored entries.
 """
+import base64
+import binascii
 import json
 import os
 import re
 import shutil
+import tempfile
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,6 +56,13 @@ from .sender_settings import (
     sanitize_text,
     settings_path,
     validate_settings,
+)
+from .timetable_import import (
+    merge_courses,
+    parse_csv_text,
+    parse_json_text,
+    parse_text,
+    parse_xlsx,
 )
 from .week_calc import teaching_week
 
@@ -621,6 +639,192 @@ def send_sender_test(data_dir, payload, env=None, transport=None,
     }
 
 
+# -------------------------------------------------------- timetable import ----
+IMPORT_EXTENSIONS = {".txt", ".csv", ".xlsx", ".json"}
+IMPORT_MAX_BYTES = 2 * 1024 * 1024
+_IMPORT_FIELDS = {"filename", "contentBase64", "text"}
+IMPORT_PATHS = {"/api/import/preview", "/api/import/apply"}
+
+
+def _import_term(data_dir):
+    term_path = Path(data_dir) / "term.json"
+    if not term_path.exists():
+        raise WebUIError(
+            "缺少 data/term.json，无法解析课表（节次换算需要学期数据）",
+            status=500,
+        )
+    return _load_json(term_path, {})
+
+
+def _parse_import_bytes(raw, ext, term):
+    """Dispatch decoded file bytes to the same parsers load_input uses."""
+    if ext == ".xlsx":
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".xlsx", delete=False
+            ) as handle:
+                handle.write(raw)
+                tmp = handle.name
+            return parse_xlsx(tmp, term)
+        except Exception as exc:
+            raise WebUIError(f"XLSX 解析失败：{exc}") from exc
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    try:
+        if ext == ".csv":
+            return parse_csv_text(raw.decode("utf-8-sig"), term)
+        if ext == ".json":
+            return parse_json_text(raw.decode("utf-8"), term)
+        return parse_text(raw.decode("utf-8"), term)
+    except Exception as exc:
+        raise WebUIError(f"解析失败：{exc}") from exc
+
+
+def _parse_import_payload(data_dir, payload):
+    """Validate an import request body and parse it deterministically.
+
+    Exactly one input form: {"text": ...} (pasted free-form lines, e.g.
+    text converted from a timetable screenshot) or
+    {"filename": ..., "contentBase64": ...} (an uploaded
+    .txt/.csv/.xlsx/.json file; decoded size capped at 2 MB).
+    Returns (courses, source) where courses may carry "_issues".
+    This function never writes anything.
+    """
+    if not isinstance(payload, dict):
+        raise WebUIError("请求体必须是 JSON 对象")
+    unknown = sorted(set(payload) - _IMPORT_FIELDS)
+    if unknown:
+        raise WebUIError(
+            "发现未知字段，拒绝解析",
+            errors=[f"未知字段：{', '.join(unknown)}"],
+        )
+    has_text = "text" in payload
+    has_file = "filename" in payload or "contentBase64" in payload
+    if has_text and has_file:
+        raise WebUIError("文件上传和粘贴文字只能二选一，请只保留一种输入")
+    if not has_text and not has_file:
+        raise WebUIError("没有提供课表内容：请选择课表文件，或粘贴课表文字")
+
+    term = _import_term(data_dir)
+    if has_text:
+        text = payload["text"]
+        if not isinstance(text, str) or not text.strip():
+            raise WebUIError("粘贴的课表文字为空")
+        if len(text.encode("utf-8")) > IMPORT_MAX_BYTES:
+            raise WebUIError("课表文字超过 2 MB 上限")
+        try:
+            courses = parse_text(text, term)
+        except Exception as exc:
+            raise WebUIError(f"解析失败：{exc}") from exc
+        source = {"kind": "text"}
+    else:
+        filename = payload.get("filename")
+        content_b64 = payload.get("contentBase64")
+        if not isinstance(filename, str) or not filename.strip():
+            raise WebUIError(
+                "filename 必须是非空字符串（上传文件的原始文件名）"
+            )
+        if not isinstance(content_b64, str) or not content_b64.strip():
+            raise WebUIError(
+                "contentBase64 必须是非空字符串（文件内容的 base64 编码）"
+            )
+        ext = Path(filename.strip()).suffix.lower()
+        if ext not in IMPORT_EXTENSIONS:
+            raise WebUIError(
+                f"不支持的文件类型：{ext or '（无扩展名）'}；"
+                "只接受 .txt / .csv / .xlsx / .json"
+                "（.xls 老格式请先在 Excel/WPS 里另存为 .xlsx 或 .csv）"
+            )
+        try:
+            raw = base64.b64decode(content_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise WebUIError(
+                f"contentBase64 不是合法的 base64：{exc}"
+            ) from exc
+        if len(raw) > IMPORT_MAX_BYTES:
+            raise WebUIError(
+                f"文件大小 {len(raw)} 字节超过 2 MB 上限"
+                f"（{IMPORT_MAX_BYTES} 字节）"
+            )
+        source = {"kind": "file", "filename": filename.strip()}
+        courses = _parse_import_bytes(raw, ext, term)
+    if not courses:
+        raise WebUIError(
+            "没有解析出任何课程：请确认内容是「每行一门课」的文字，"
+            "或带表头的 CSV / JSON / XLSX 课表"
+        )
+    return courses, source
+
+
+def _import_summary(courses, existing):
+    _, added, duplicates = merge_courses(existing, courses)
+    return {
+        "total": len(courses),
+        "withIssues": sum(1 for c in courses if c.get("_issues")),
+        "issueCount": sum(len(c.get("_issues") or []) for c in courses),
+        "willAdd": len(added),
+        "duplicates": len(duplicates),
+        "duplicateNames": [c.get("name") or "" for c in duplicates],
+    }
+
+
+def preview_import(data_dir, payload):
+    """Parse only — never writes. Mirrors import_timetable.py's preview:
+    each course is returned with its "_issues" (if any) so the UI can
+    flag them one by one."""
+    courses, source = _parse_import_payload(data_dir, payload)
+    existing = _load_json(Path(data_dir) / "courses.json", [])
+    return {
+        "ok": True,
+        "source": source,
+        "courses": courses,
+        "summary": _import_summary(courses, existing),
+        "issuesNote": (
+            "带「待确认」的课程与命令行导入一致：会照常导入，待确认字段"
+            "留空、不会被猜测填充，_issues 本身不会写进 courses.json；"
+            "导入后请核对修正。"
+        ),
+    }
+
+
+def apply_import(data_dir, payload):
+    """Re-parse the same raw input (deterministic ⇒ identical to the
+    preview; no server-side session state) and write, mirroring
+    import_timetable.py --apply: timestamped backup first, dedupe by
+    name+weekday+sections+weeks, and when nothing is new the file is
+    not touched at all."""
+    courses, source = _parse_import_payload(data_dir, payload)
+    data = Path(data_dir)
+    courses_path = data / "courses.json"
+    existing = _load_json(courses_path, [])
+    merged, added, duplicates = merge_courses(existing, courses)
+    backup = None
+    if added:
+        backup = _backup(courses_path)
+        _write_json(courses_path, merged)
+    return {
+        "ok": True,
+        "message": (
+            f"导入完成：新增 {len(added)} 门，"
+            f"跳过重复 {len(duplicates)} 门，现有共 {len(merged)} 门"
+        ),
+        "source": source,
+        "added": len(added),
+        "addedNames": [c.get("name") or "" for c in added],
+        "skippedDuplicates": len(duplicates),
+        "duplicateNames": [c.get("name") or "" for c in duplicates],
+        "withIssues": sum(1 for c in courses if c.get("_issues")),
+        "total": len(merged),
+        "backup": backup,
+        "courses": [_course_view(item) for item in merged],
+    }
+
+
 # ------------------------------------------------------------------- routing ----
 def _json_bytes(value):
     return json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
@@ -649,6 +853,7 @@ def handle_request(data_dir, method, raw_path, body=b"", env=None,
         if method == "POST" and path in {
             "/api/config", "/api/course-override",
             "/api/sender", "/api/sender/test",
+            "/api/import/preview", "/api/import/apply",
         }:
             try:
                 payload = json.loads((body or b"").decode("utf-8"))
@@ -660,6 +865,10 @@ def handle_request(data_dir, method, raw_path, body=b"", env=None,
                 result = save_course_override(data_dir, payload)
             elif path == "/api/sender":
                 result = save_sender_settings(data_dir, payload, env=env)
+            elif path == "/api/import/preview":
+                result = preview_import(data_dir, payload)
+            elif path == "/api/import/apply":
+                result = apply_import(data_dir, payload)
             else:
                 result = send_sender_test(
                     data_dir, payload, env=env, transport=transport,
@@ -710,7 +919,15 @@ def make_handler(data_dir):
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 length = -1
-            if length < 0 or length > 64 * 1024:
+            # Import uploads carry a base64 file (2 MB file ≈ 2.8 MB of
+            # base64), so those two endpoints get a larger — still
+            # bounded — body limit; everything else stays at 64 KB.
+            limit = (
+                4 * 1024 * 1024
+                if urlparse(self.path).path in IMPORT_PATHS
+                else 64 * 1024
+            )
+            if length < 0 or length > limit:
                 payload = _json_bytes(
                     {
                         "ok": False,

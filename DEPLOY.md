@@ -93,6 +93,8 @@ python3 scripts/import_timetable.py 我的课表.txt     # 先预览，核对每
 python3 scripts/import_timetable.py 我的课表.txt --apply   # 确认无误才写入（自动备份）
 ```
 
+也可以打开 Web UI 的导入页完成：启动 `python3 scripts/serve_ui.py` 后进入「导入课表」页，上传文件或粘贴文字，预览确认后点「确认导入」，效果与命令行 `--apply` 相同。
+
 识别不准的字段会被标成"待确认"，导入器**不会猜**——预览里逐条核对
 周次/节次/教室再 `--apply`。同时检查 `data/term.json`：开学第一周的
 周一、总周数、节假日、调休、每节课的起止时间都要和你的学校一致；
