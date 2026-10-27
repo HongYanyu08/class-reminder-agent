@@ -8,6 +8,9 @@
     "defaultTravelMin": 15,
     "defaultBufferMin": 10,
     "rainExtraMin": 10,
+    "severeExtraMin": 20,
+    "followUpGraceMin": 10,
+    "disabledTypes": [],
     "quietHours": {
       "start": "23:00",
       "end": "07:00"

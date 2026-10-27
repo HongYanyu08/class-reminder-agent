@@ -14,7 +14,10 @@ Usage:
 Channels (src/sender.py): console (default) / outbox / webhook / gateway,
 chosen by --channel or the REMINDER_CHANNEL env var; webhook and gateway
 read their secrets/targets from env vars only (REMINDER_WEBHOOK_URL,
-REMINDER_GATEWAY_CMD). Already-sent tasks are never re-sent: regeneration
+REMINDER_GATEWAY_CMD). Departure reminders gain weather lead time when
+WEATHER_LAT / WEATHER_LON are set (src/weather.py, Open-Meteo, cached 3 h
+in data/weather_cache.json); unconfigured or failing weather simply means
+no extra minutes. Already-sent tasks are never re-sent: regeneration
 merges the stored runtime state back in (scheduler.merge_task_states).
 Failed tasks are not retried automatically — flip status back to pending
 in reminders.json to retry by hand.
@@ -27,8 +30,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.expand import expand
 from src.scheduler import generate_reminders, find_due, compose_message, \
-    merge_task_states, dispatch_due
+    merge_task_states, dispatch_due, generate_follow_ups, reactivate_snoozed, \
+    DEFAULT_FOLLOWUP_GRACE_MIN
 from src.sender import build_sender, SenderConfigError
+from src.weather import build_weather_provider
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -64,24 +69,52 @@ def main():
         existing = load(data, "reminders.json")
 
     occs = expand(term, courses, exceptions, args.from_date, args.days)
+    prefs = user.get("preferences", {})
+    now = args.now or datetime.now().astimezone().isoformat()
+    now_dt = datetime.fromisoformat(now)
+
+    # Weather lead time (src/weather.py): coordinates come from the
+    # WEATHER_LAT / WEATHER_LON env vars only — unconfigured means the
+    # feature is off and departures keep their base times. Weather is an
+    # enhancement, never a blocker: any failure degrades to "no extra
+    # minutes" inside the provider. A hard --dry-run must not write any
+    # file, so fetching (which writes the cache) is disabled there; a
+    # pre-existing cache may still be read.
+    provider = build_weather_provider(
+        cache_path=data / "weather_cache.json",
+        timezone=user.get("timezone", "Asia/Shanghai"),
+        allow_fetch=not args.dry_run)
+    weather_at = (lambda dt: provider.level_at(dt, now_dt)) if provider.enabled else None
     tasks = merge_task_states(
-        generate_reminders(occs, courses, user.get("preferences", {})), existing)
+        generate_reminders(occs, courses, prefs, weather_at=weather_at), existing)
+
+    by_id = {o["id"]: o for o in occs}
+    # Reply loop (src/ack.py): snoozed tasks whose time is up become due
+    # again, and unacknowledged classes past their grace period gain their
+    # single follow_up task — both before anything is saved or sent.
+    reactivate_snoozed(tasks, now)
+    tasks += generate_follow_ups(
+        tasks, by_id, now,
+        grace_min=int(prefs.get("followUpGraceMin", DEFAULT_FOLLOWUP_GRACE_MIN)),
+        disabled_types=prefs.get("disabledTypes") or [],
+        course_disabled={c["id"]: (c.get("reminderOverride") or {}).get("disabledTypes") or []
+                         for c in courses})
+    tasks.sort(key=lambda t: t["scheduledAt"])
 
     if not args.dry_run:
         save(data, "occurrences.json", occs)
         save(data, "reminders.json", tasks)
     print(f"occurrences: {len(occs)}  reminder tasks: {len(tasks)}")
+    if provider.enabled:
+        print(f"weather: {provider.status}（出门提醒已按天气叠加提前量，见任务 weatherNote）")
     if not args.tick:
         return 0
-
-    now = args.now or datetime.now().astimezone().isoformat()
-    by_id = {o["id"]: o for o in occs}
 
     if dry_run:
         due = find_due(tasks, now)
         for t in due:
             occ = by_id.get(t["occurrenceId"])
-            msg = compose_message(occ, t["type"]) if occ else "(occurrence 缺失)"
+            msg = compose_message(occ, t["type"], t) if occ else "(occurrence 缺失)"
             print("[DUE]", t["type"], msg)
         mode = "--dry-run" if args.dry_run else "未加 --send"
         print(f"[预览模式] 到期 {len(due)} 条，未发送（{mode}）。确认后用 --tick --send 发送。")

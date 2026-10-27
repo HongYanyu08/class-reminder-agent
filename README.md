@@ -19,11 +19,11 @@
 
 ```
 用户输入（文字 / 图片 / 转发的班群通知）
-        ↓  Skills（timetable-import / notice-parser / reminder-composer）
+        ↓  Skills（timetable-import / notice-parser / reminder-composer / course-query / reminder-config）
         ↓  LLM 只负责转文字与措辞，锚定与解析在确定性代码里完成
 data/*.json ──→ src/ 确定性核心 ──→ Occurrence（未来 14 天）──→ ReminderTask
  term/courses     week_calc 周次/调休      expand 展开+应用例外      scheduler 生成/合并状态/分发
- exceptions/user  timetable_import 导入    notice_parser 通知解析    sender 可插拔发送通道
+ exceptions/user  timetable_import 导入    notice_parser 通知解析    sender 发送 / ack 回执 / query 查课表 / config_edit 改配置
         ↑
 HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期任务经 sender 发出并回写状态
 ```
@@ -37,8 +37,10 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
 | 周次与展开 | ✅ 已实现 | 教学周、单双周、节假日、调休（makeupDays）；滚动展开未来 14 天 Occurrence 并应用例外 |
 | 提醒调度 | ✅ 已实现 | 三级提醒时刻全部确定性计算；每 tick 重新生成任务并与已存运行状态合并，已发送的永不被重置 |
 | 发送层 | ✅ 已实现 | 可插拔通道 console / outbox / webhook / gateway（见下）；成功回写 sent+sentAt+channel，失败回写 failed+error；已 sent 不重发，failed 不自动重试 |
-| 天气提前量 | ⬜ 待做 | `user.json` 已预留 `rainExtraMin`，尚未接天气 API 给出门提醒加提前量 |
-| 回执确认 | ⬜ 待做 | 用户回复“收到/请假了/snooze”后回写 acknowledged / snoozed（数据流已在 AGENTS.md 定义，未实现） |
+| 天气提前量 | ✅ 已实现 | `src/weather.py` 接 Open-Meteo（免费、无需 key）：坐标配了才启用，降雨给 departure 加 `rainExtraMin`（默认 10 分钟）、恶劣天气加 `severeExtraMin`（默认 20 分钟）；预报缓存 3 小时，失败回退过期缓存或不加量，绝不阻塞 tick（见“天气提前量”） |
+| 回执确认 | ✅ 已实现 | `src/ack.py` + `scripts/handle_reply.py`：回复分确认/请假/稍后三类确定性回写（见“处理回执”）；已 sent 超过宽限期（默认 10 分钟）仍未确认的课自动生成一条 follow_up 追问，一次课只追问一次 |
+| 对话查课表 | ✅ 已实现 | `src/query.py` + `scripts/ask.py`：确定性问答——按日期查、按课程查（时间/地点/携带/老师）、下节课、本周概览；答案全部经 `expand()` 计算，例外如实呈现（停课注明、调课按新时间与新地点）；日期锚不准/课程多义返回澄清，绝不猜；只读，不写任何数据（见“对话查课表”） |
+| 对话改提醒配置 | ✅ 已实现 | `src/config_edit.py` + `scripts/configure.py`：一句话改全局偏好（前晚时间/课前提前量/路程/缓冲/天气加量/追问宽限/静默时段）、开关四类提醒、改单课覆盖（出门提前量、单课开关）；变更计划先预览，用户确认 `--apply` 才写入并备份；数值含糊/越界/课程多义一律待确认不猜（见“对话改提醒配置”） |
 | OpenClaw 网关联调 | ⬜ 待联调 | gateway 通道是命令适配接口（见下），需在真实 OpenClaw 环境配置命令后联调，本仓库无法自证 |
 
 ## 快速开始
@@ -79,6 +81,67 @@ python3 scripts/parse_notice.py "本周三大学英语停课一次" --date 2026-
 解析出一条 CourseException，只影响单次课；课程或日期锚不准时标“待确认”并拒绝写入。
 规则见 `skills/notice-parser/SKILL.md`。
 
+### 处理回执（收到 / 请假 / 稍后提醒）
+```bash
+python3 scripts/handle_reply.py "收到"                                  # 先预览：将回写哪条任务、改成什么
+python3 scripts/handle_reply.py "高等数学请假了，今天不去上课" --apply      # 确认后回写（自动备份）
+python3 scripts/handle_reply.py "过10分钟再提醒我" --apply                # snooze，可带时长；没写时长默认 10 分钟（--snooze-min 可调）
+```
+回执规则（`src/ack.py`，与 AGENTS.md 数据流 3 一致）：
+- **定位**：回复点名课程 → 定位该课；没点名 → 定位最近一条已发送且未确认的提醒所属的那次课；
+  多条候选无法唯一确定（如发送时间相同）→ 标“待确认”列出候选，**拒绝回写**。
+- **确认类**（收到/确认/知道了/OK…）→ 该次课所有已发送提醒回写 `status=acknowledged`、
+  `acknowledgedAt`，并留存回复原文（`reply` 字段）。
+- **请假类**（请假了/今天不去上课…）→ 已发送提醒回写 acknowledged 并标 `note=leave`；
+  该次课还没发的提醒全部 `status=cancelled`（这节课不去了，后续提醒不再打扰），理由留痕。
+- **稍后类**（晚点提醒/snooze/过X分钟再提醒…）→ 回写 `status=snoozed` + `snoozeUntil`；
+  到期后的下一 tick 自动恢复为 pending 并重发（`resumedAt` 留痕）。
+- **追问 follow_up**：departure / pre_class 已发送、课程开始 + 宽限期（`user.json` 的
+  `followUpGraceMin`，默认 10 分钟）已过、仍未确认也未 snooze → 生成一条 follow_up 任务
+  （排在“开始+宽限期”时刻，一次课最多一条，确认/请假后不再生成；课堂结束之后不再补发追问）。
+
+### 对话查课表
+```bash
+python3 scripts/ask.py "明天有什么课"                                   # 直接输出可读答案
+python3 scripts/ask.py "高等数学什么时候上" --date 2026-09-14            # --date 指定参照日（默认今天）
+python3 scripts/ask.py "下节课是什么" --date 2026-09-07T07:30:00 --json  # 结构化输出，给智能体消费
+```
+查询引擎（`src/query.py`，口径见 `skills/course-query/SKILL.md`）：
+- **支持的问法**：按日期（今天/明天/本周三/下周一/9月16日/第3周周五有什么课）、按课程
+  （什么时候上 / 在哪上 / 要带什么 / 老师是谁）、下节课、本周概览、以及“明天高等数学有课吗”
+  这类日期+课程的组合问法。
+- **答案只来自数据**：全部经 `expand()` 展开计算（含单双周、假期、调休），智能体只转发
+  问题与答案，不许自己编课。例外如实呈现：停课的那次会注明“已停课”而不是消失，
+  调课按新日期/新地点出现且原日期注明已调走，换教室/线上按新地点显示。
+- **不猜**：只说“周三”没说哪一周、简称同时匹配多门课 → 返回澄清（列出候选/示例问法），
+  没听懂的问句会明确说没听懂并给出支持的问法。查询是只读的，永远不写 data/。
+
+### 对话改提醒配置
+```bash
+python3 scripts/configure.py "课前提前20分钟提醒"              # 先预览变更计划（不写入）
+python3 scripts/configure.py "课前提前20分钟提醒" --apply      # 用户确认后写入（自动备份，只改涉及的文件）
+python3 scripts/configure.py "关掉前晚提醒" --apply            # 全局关掉一类提醒
+python3 scripts/configure.py "高数出门提前50分钟" --apply      # 单课覆盖：该课的出门提前量
+python3 scripts/configure.py "关掉高数的前晚提醒" --apply      # 单课覆盖：只关该课的前晚提醒
+python3 scripts/configure.py "静默时间改成23:30到7:30" --apply
+python3 scripts/configure.py "我现在的提醒设置是怎样的"         # 查看当前生效设置（只读）
+```
+配置引擎（`src/config_edit.py`，口径见 `skills/reminder-config/SKILL.md`）：
+- **能改的**：全局偏好——前晚提醒时间、课前提前量、默认路程、缓冲、雨天/恶劣天气加量、
+  追问宽限、静默时段起止；四类提醒（night_before / departure / pre_class / follow_up）
+  的全局开关；单课覆盖——某门课的出门提前量与该课的类型开关。开关的数据模型是
+  `preferences.disabledTypes` 与 `reminderOverride.disabledTypes` 两个列表（空 = 全开），
+  scheduler 生成任务时尊重它们：**被关的类型不生成任务**（follow_up 追问同样受开关控制）。
+- **生效方式**：改完下一 tick 起，新生成/待发的 pending 任务按新设置计算时刻；
+  已 sent 的任务状态经 `merge_task_states` 合并保留，不会被改配置重置、更不会重发
+  （注：合并口径下已发送任务记录里的 `scheduledAt` 会随重新生成刷新为新时刻，
+  但状态仍是 sent，不影响发送行为）。
+- **不猜**：分钟数只认 0–180、时间只认合法 HH:MM；“提前一点”没给数、点名课程却要改
+  只有全局版的字段、简称匹配多门课 → 一律标“待确认”说明缺什么，拒绝写入（退出码 1）；
+  “多提前5分钟”这类增减说法按现值 ± 计算，预览里会展示旧值 → 新值让用户核对。
+- 全局没有单一的“出门提前量”字段（出门时刻 = 路程 + 缓冲，或单课覆盖），
+  没点名课程就说改出门时间会被要求说清改哪一项。
+
 ### 跑调度器
 ```bash
 python3 scripts/run_scheduler.py --expand --from 2026-09-07 --days 14   # 只展开课表+生成任务（写 occurrences/reminders）
@@ -91,6 +154,26 @@ python3 scripts/run_scheduler.py --tick --now 2026-09-13T21:00:00+08:00  # 指�
 ```
 退出码：0 正常 · 1 至少一条发送失败 · 2 通道配置错误（此时不发送、不改任何任务状态）。
 部署到 HEARTBEAT 时把命令换成 `--tick --send` 才会真正发出提醒；不加 `--send` 永远只是预览。
+
+### 天气提前量（出门提醒按天气提前）
+```bash
+export WEATHER_LAT=你的纬度    # 两个坐标都配齐才启用，只从环境变量读，绝不写进数据文件
+export WEATHER_LON=你的经度
+```
+规则（`src/weather.py`，Open-Meteo 逐小时预报，免费、无需 API key）：
+- **判定**：按 WMO 天气代码分级——重降水/雷暴为 `severe`，其他降水为 `rain`；
+  无降水代码时，降水概率 ≥ 50% 也判 `rain`。判定时点为基础出门时刻所在的那一小时。
+- **加量**：`rain` → departure 在基础提前量（单课覆盖或路程+缓冲）之上再加
+  `user.json` 的 `rainExtraMin`（默认 10 分钟）；`severe` → 加 `severeExtraMin`（默认 20 分钟）；
+  晴/无数据 → 不加。只影响 departure 一类提醒，night_before / pre_class 时刻不变。
+- **幂等**：每 tick 都从课程开始时间重新计算，同一预报下连跑多次 departure 时刻完全一致，
+  不会越叠越多；被加量的任务带 `weatherExtraMin` / `weatherNote` 留痕，提醒文案会带上
+  「天气：降雨，已提前 10 分钟」一句（没加量时不加这句）。
+- **缓存与失败回退**：预报缓存到 `data/weather_cache.json`（已 gitignore），默认 TTL 3 小时
+  （`WEATHER_CACHE_TTL_H` 可调），tick 每 5 分钟跑也不会每次请求；请求失败时用过期缓存
+  （状态标 `stale`），连缓存也没有就按无天气处理（`unavailable`）——天气失败**绝不**让 tick 崩。
+  没配坐标时功能关闭（`disabled`），一切照常。预报约覆盖未来 16 天，展开窗口 14 天在覆盖内；
+  覆盖不到的小时按无数据处理。
 
 ## 发送通道
 
@@ -118,17 +201,20 @@ python3 scripts/run_scheduler.py --tick --now 2026-09-13T21:00:00+08:00  # 指�
 - **Term**（`data/term.json`）：学期锚点——`firstWeekMonday`、总周数、假期、调休日
   （`makeupDays`：某天按周几的课表上课）、节次时间表。
 - **Course**（`data/courses.json`）：周期模板——周几、第几节与起止时间、周次模式
-  （all/range/odd/even/list）、地点、教师、携带物品、可选的单课提醒覆盖。
+  （all/range/odd/even/list）、地点、教师、携带物品、可选的单课提醒覆盖
+  （`reminderOverride`：出门提前量 `departureLeadMin`、该课关闭的提醒类型 `disabledTypes`）。
 - **CourseException**（`data/exceptions.json`）：单次变更——锚定 `courseId + originalDate`，
   类型 cancel / reschedule / location_change / online，可带新日期/新地点；
   `confirmed=false` 的预览永不入库。
 - **Occurrence**（`data/occurrences.json`，生成物）：模板在滚动 14 天内展开的具体一次课，
   已应用假期、调休与例外。
 - **ReminderTask**（`data/reminders.json`，生成物+运行状态）：一条提醒——类型
-  night_before / departure / pre_class（follow_up 预留）、`scheduledAt`、状态机
-  `pending → sent / failed`（acknowledged / snoozed 待回执功能实现后启用），
-  以及 sentAt / channel / error / retryCount 等运行字段。
-- **User**（`data/user.json`）：时区与提醒偏好（前晚时间、课前提前量、路程/缓冲、预留的下雨提前量、安静时段）。
+  night_before / departure / pre_class / follow_up（未确认追问，运行时生成）、`scheduledAt`、状态机
+  `pending → sent / failed`，回执后 `sent → acknowledged / snoozed`（请假时同次课的 pending
+  任务 → `cancelled`），snoozed 到期自动回到 pending；以及 sentAt / channel / error /
+  retryCount / acknowledgedAt / snoozeUntil / reply / note 等运行字段。
+- **User**（`data/user.json`）：时区与提醒偏好（前晚时间、课前提前量、路程/缓冲、下雨/恶劣天气提前量 `rainExtraMin` / `severeExtraMin`、回执宽限期、安静时段、全局关闭的提醒类型 `disabledTypes`）。
+  另有运行时缓存 `data/weather_cache.json`（Open-Meteo 预报，已 gitignore，不手改）。
 
 ## 目录结构
 
@@ -136,10 +222,10 @@ python3 scripts/run_scheduler.py --tick --now 2026-09-13T21:00:00+08:00  # 指�
 SOUL.md / AGENTS.md / HEARTBEAT.md / USER.md / TOOLS.md   OpenClaw 智能体定义（HEARTBEAT 每 5 分钟触发 tick）
 config/openclaw.json     OpenClaw 基础配置（DeepSeek 模型、网关与工具权限收紧；channels 待部署时配置）
 data/                    term / courses / exceptions / user（输入）+ occurrences / reminders（生成）+ outbox/（发送日志，运行时产生）
-skills/                  timetable-import / notice-parser / reminder-composer（给智能体的操作规程）
-src/                     week_calc / expand / scheduler / sender / timetable_import / notice_parser（纯标准库）
-scripts/                 run_scheduler（调度入口）/ import_timetable / parse_notice（默认预览，--apply/--send 才生效）
-tests/                   核心逻辑 + 导入 + 通知解析 + 发送层单元测试（54 个）
+skills/                  timetable-import / notice-parser / reminder-composer / course-query / reminder-config（给智能体的操作规程）
+src/                     week_calc / expand / scheduler / sender / timetable_import / notice_parser / ack / weather / query / config_edit（纯标准库）
+scripts/                 run_scheduler（调度入口）/ import_timetable / parse_notice / handle_reply / configure（默认预览，--apply/--send 才生效）/ ask（对话查课表，只读）
+tests/                   核心逻辑 + 导入 + 通知解析 + 发送层 + 回执 + 天气 + 对话查询 + 改配置单元测试（175 个）
 examples/                示例课表（.txt / .csv）
 .env.example             环境变量清单（只有变量名与说明，无真实值）
 ```
@@ -147,7 +233,7 @@ examples/                示例课表（.txt / .csv）
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests        # 54 个，全部本地运行
+python3 -m unittest discover -s tests        # 175 个，全部本地运行
 ```
 发送层测试全部走注入的假 transport / 假 runner 与临时目录，不打真实外网、不动真实 `data/`；
 CLI 端到端测试用临时数据副本验证发送回写、不重发与 dry-run 不落盘。
@@ -162,9 +248,10 @@ CLI 端到端测试用临时数据副本验证发送回写、不重发与 dry-ru
 
 ## 下一步（TODO）
 
-- [ ] 接入天气 API，出门提醒按天气加提前量（`rainExtraMin` 已预留）
-- [ ] 提醒状态机：收到回复后 acknowledged / snoozed 的回写
+- [x] 接入天气 API（Open-Meteo），出门提醒按天气加提前量（rain 加 `rainExtraMin`、severe 加 `severeExtraMin`，缓存+失败回退，src/weather.py）
+- [x] 提醒状态机：收到回复后 acknowledged / snoozed 的回写（src/ack.py + handle_reply.py，含 follow_up 追问）
 - [ ] 在真实 OpenClaw 环境联调 gateway 通道，并把 HEARTBEAT 命令切到 `--tick --send`
 - [x] run_scheduler 的发送从 print 改为真实渠道发送（console/outbox/webhook/gateway 可插拔）
 - [x] timetable-import：文字/CSV/XLSX/JSON 导入（图片经智能体转文字后导入）
 - [x] notice-parser：确定性解析调课/停课通知，预览确认后写入 exceptions.json（DeepSeek 只负责送原文/复述，不参与锚定）
+- [x] 对话改提醒配置：确定性解析改配置的话（src/config_edit.py + configure.py），预览确认后写入 user.json/courses.json，scheduler 尊重全局/单课类型开关

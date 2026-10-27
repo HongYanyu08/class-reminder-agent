@@ -10,6 +10,7 @@ __pycache__/
 # generated runtime data (keep the example templates, ignore live copies if you split them)
 # data/occurrences.json
 # data/reminders.json
+data/weather_cache.json
 
 # OS / editor
 .DS_Store
