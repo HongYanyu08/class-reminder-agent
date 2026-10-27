@@ -42,7 +42,7 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
 | 对话查课表 | ✅ 已实现 | `src/query.py` + `scripts/ask.py`：确定性问答——按日期查、按课程查（时间/地点/携带/老师）、下节课、本周概览；答案全部经 `expand()` 计算，例外如实呈现（停课注明、调课按新时间与新地点）；日期锚不准/课程多义返回澄清，绝不猜；只读，不写任何数据（见“对话查课表”） |
 | 对话改提醒配置 | ✅ 已实现 | `src/config_edit.py` + `scripts/configure.py`：一句话改全局偏好（前晚时间/课前提前量/路程/缓冲/天气加量/追问宽限/静默时段）、开关四类提醒、改单课覆盖（出门提前量、单课开关）；变更计划先预览，用户确认 `--apply` 才写入并备份；数值含糊/越界/课程多义一律待确认不猜（见“对话改提醒配置”） |
 | Web 配置 UI | ✅ 已实现 | `src/webui.py` + `scripts/serve_ui.py` + `ui/index.html`：本地网页含总览、提醒设置、单课覆盖、未来 14 天课程、发送渠道五个区块；服务端逐项校验、非法整单拒绝、写前备份；发送渠道页可配通道、保存设置并真发一条测试消息，webhook URL 只回打码版；无服务打开同一 HTML 时自动进入演示模式（示例数据，不会保存）（见“Web 配置 UI”） |
-| OpenClaw 网关联调 | ⬜ 待联调 | gateway 通道是命令适配接口（见下），需在真实 OpenClaw 环境配置命令后联调，本仓库无法自证 |
+| OpenClaw + 微信实测部署 | ✅ 已实测 | 官方 openclaw-weixin 插件 + session 主会话投递（两阶段：tick 排队 → 智能体在主会话说出 → `--confirm-sent` 回写）；直发 `message send` 会被 iLink 以 ret=-3 拒绝，原因与解法、完整部署步骤见 [DEPLOY.md](DEPLOY.md)，一键配置脚本 `scripts/deploy_setup.py` |
 
 ## 快速开始
 
@@ -63,6 +63,22 @@ HEARTBEAT 每 5 分钟 → scripts/run_scheduler.py --tick [--send] → 到期�
    python3 -m unittest discover -s tests -v                                  # 全部测试
    python3 scripts/run_scheduler.py --tick --now 2026-09-13T21:00:00+08:00   # 预览到期提醒，不发送
    ```
+
+## 快速部署（OpenClaw + 微信自动提醒）
+
+把提醒真正跑起来（装 OpenClaw、接微信、每 5 分钟自动 tick）只要三步，
+完整版（含前置版本要求、扫码登录、故障排查）见 [DEPLOY.md](DEPLOY.md)：
+
+1. **装 OpenClaw + 微信插件**：完成 onboard（DeepSeek，key 只放环境变量），再
+   `openclaw plugins install "@tencent-weixin/openclaw-weixin"` 并
+   `openclaw channels login --channel openclaw-weixin` 扫码登录。
+2. **放项目 + 导入课表**：把本项目放进 OpenClaw 的 workspace，导入你自己的
+   课表（仓库内只有示例数据）：截图转文字 → `scripts/import_timetable.py`
+   预览 → 核对后 `--apply`。
+3. **一键配置**：`python3 scripts/deploy_setup.py`（先加 `--dry-run` 可预览
+   全部动作）——它检查环境、把发送渠道设为 session、建好每 5 分钟的
+   `cr-tick-5min` 自动 tick 任务；之后给微信 ClawBot 发条消息刷新 token，
+   等当晚 21:00 的前晚预告自动到达即部署完成。
 
 ## 使用指南
 
@@ -314,10 +330,11 @@ SOUL.md / AGENTS.md / HEARTBEAT.md / USER.md / TOOLS.md   OpenClaw 智能体定�
 config/openclaw.json     OpenClaw 基础配置（DeepSeek 模型、网关与工具权限收紧；channels 待部署时配置）
 data/                    term / courses / exceptions / user（输入）+ occurrences / reminders（生成）+ outbox/（发送日志，运行时产生）+ sender_settings.json（渠道设置，UI 维护，已 gitignore；模板 sender_settings.example.json）
 skills/                  timetable-import / notice-parser / reminder-composer / course-query / reminder-config（给智能体的操作规程）
-src/                     week_calc / expand / scheduler / sender / sender_settings（渠道设置解析）/ timetable_import / notice_parser / ack / weather / query / config_edit / webui（纯标准库）
-scripts/                 run_scheduler（调度入口）/ import_timetable / parse_notice / handle_reply / configure（默认预览，--apply/--send 才生效）/ ask（对话查课表，只读）/ serve_ui（本地 Web 配置 UI）
+src/                     week_calc / expand / scheduler / sender / sender_settings（渠道设置解析）/ session_dispatch（主会话两阶段投递）/ timetable_import / notice_parser / ack / weather / query / config_edit / webui（纯标准库）
+scripts/                 run_scheduler（调度入口）/ import_timetable / parse_notice / handle_reply / configure（默认预览，--apply/--send 才生效）/ ask（对话查课表，只读）/ serve_ui（本地 Web 配置 UI）/ deploy_setup（一键部署配置，见 DEPLOY.md）
 ui/                      index.html（配置中心单文件前端，含演示模式，无外部资源）
-tests/                   核心逻辑 + 导入 + 通知解析 + 发送层 + 渠道设置 + 回执 + 天气 + 对话查询 + 改配置 + Web UI 单元测试（216 个）
+tests/                   核心逻辑 + 导入 + 通知解析 + 发送层 + 渠道设置 + 会话投递 + 回执 + 天气 + 对话查询 + 改配置 + Web UI + 过期作废/时间归一化 + 部署脚本单元测试（258 个）
+DEPLOY.md                已验证的完整部署指南（OpenClaw + 微信插件 + 一键配置 + 故障排查）
 examples/                示例课表（.txt / .csv）
 .env.example             环境变量清单（只有变量名与说明，无真实值）
 ```
@@ -325,7 +342,7 @@ examples/                示例课表（.txt / .csv）
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests        # 216 个，全部本地运行
+python3 -m unittest discover -s tests        # 258 个，全部本地运行
 ```
 发送层测试全部走注入的假 transport / 假 runner 与临时目录，不打真实外网、不动真实 `data/`；
 渠道设置与 UI 测试发送走本机 localhost 假 webhook；CLI 端到端测试用临时数据副本
@@ -347,7 +364,7 @@ python3 -m unittest discover -s tests        # 216 个，全部本地运行
 
 - [x] 接入天气 API（Open-Meteo），出门提醒按天气加提前量（rain 加 `rainExtraMin`、severe 加 `severeExtraMin`，缓存+失败回退，src/weather.py）
 - [x] 提醒状态机：收到回复后 acknowledged / snoozed 的回写（src/ack.py + handle_reply.py，含 follow_up 追问）
-- [ ] 在真实 OpenClaw 环境联调 gateway 通道，并把 HEARTBEAT 命令切到 `--tick --send`
+- [x] 真实 OpenClaw 环境部署：微信插件 + session 主会话投递 + cr-tick-5min 自动 tick（`scripts/deploy_setup.py` 一键配置，指南见 DEPLOY.md）；gateway 命令模板通道保留为备选，未在实测部署中使用
 - [x] run_scheduler 的发送从 print 改为真实渠道发送（console/outbox/webhook/gateway 可插拔）
 - [x] timetable-import：文字/CSV/XLSX/JSON 导入（图片经智能体转文字后导入）
 - [x] notice-parser：确定性解析调课/停课通知，预览确认后写入 exceptions.json（DeepSeek 只负责送原文/复述，不参与锚定）

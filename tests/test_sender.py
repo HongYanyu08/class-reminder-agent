@@ -187,6 +187,12 @@ class SchedulerCliTest(unittest.TestCase):
         data = Path(tmp)
         for p in (ROOT / "data").glob("*.json"):
             shutil.copyfile(p, data / p.name)
+        # These tests exercise dispatch mechanics at a fixed "now"
+        # where the sample tasks are long overdue — disable stale
+        # expiry (its own coverage lives in test_freshness.py).
+        user = json.loads((data / "user.json").read_text(encoding="utf-8"))
+        user.setdefault("preferences", {})["staleExpireMin"] = 0
+        (data / "user.json").write_text(json.dumps(user), encoding="utf-8")
         return data
     def _run(self, data, *extra):
         return subprocess.run(

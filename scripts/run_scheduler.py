@@ -33,7 +33,12 @@ in data/weather_cache.json); unconfigured or failing weather simply means
 no extra minutes. Already-sent tasks are never re-sent: regeneration
 merges the stored runtime state back in (scheduler.merge_task_states).
 Failed tasks are not retried automatically — flip status back to pending
-in reminders.json to retry by hand.
+in reminders.json to retry by hand. A --now without a UTC offset is read
+in the term's timezone (never a naive/aware TypeError). Pending tasks
+whose moment passed more than staleExpireMin minutes ago (preference
+in user.json, default 120) are marked "expired" instead of being sent,
+so a first deployment or a long shutdown does not produce a flood of
+stale reminders.
 
 Exit codes: 0 ok · 1 at least one send failed · 2 channel misconfigured.
 """
@@ -44,7 +49,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.expand import expand
 from src.scheduler import generate_reminders, find_due, compose_message, \
     merge_task_states, dispatch_due, generate_follow_ups, reactivate_snoozed, \
-    DEFAULT_FOLLOWUP_GRACE_MIN
+    expire_stale_tasks, normalize_now_iso, data_tz_name, \
+    DEFAULT_FOLLOWUP_GRACE_MIN, DEFAULT_STALE_EXPIRE_MIN
 from src.sender import build_sender, SenderConfigError
 from src.session_dispatch import queue_due_for_session, confirm_session_sent, \
     requeue_stale_session_tasks, SESSION_REQUEUE_MIN
@@ -107,7 +113,10 @@ def main():
             print("[参数错误] --confirm-sent 是独立模式，不能与 --tick/--expand 同时使用。",
                   file=sys.stderr)
             return 2
-        now = args.now or datetime.now().astimezone().isoformat()
+        # A naive --now is read in the data dir's timezone (term/user),
+        # exactly like the tick path — never a naive/aware TypeError.
+        now = (normalize_now_iso(args.now, data_tz_name(data)) if args.now
+               else datetime.now().astimezone().isoformat())
         return confirm_sent_mode(data, args.confirm_sent, now)
     dry_run = args.dry_run or not args.send
 
@@ -119,8 +128,17 @@ def main():
 
     occs = expand(term, courses, exceptions, args.from_date, args.days)
     prefs = user.get("preferences", {})
-    now = args.now or datetime.now().astimezone().isoformat()
+    # A naive --now (e.g. "2026-10-27T21:05", no offset) is interpreted
+    # in the term's timezone instead of crashing against the aware
+    # scheduledAt values; an aware --now passes through untouched.
+    tz_name = term.get("timezone") or user.get("timezone") or "Asia/Shanghai"
+    now = (normalize_now_iso(args.now, tz_name) if args.now
+           else datetime.now().astimezone().isoformat())
     now_dt = datetime.fromisoformat(now)
+    try:
+        stale_min = int(prefs.get("staleExpireMin", DEFAULT_STALE_EXPIRE_MIN))
+    except (TypeError, ValueError):
+        stale_min = DEFAULT_STALE_EXPIRE_MIN
 
     # Weather lead time (src/weather.py): coordinates come from the
     # WEATHER_LAT / WEATHER_LON env vars only — unconfigured means the
@@ -142,6 +160,11 @@ def main():
     # again, and unacknowledged classes past their grace period gain their
     # single follow_up task — both before anything is saved or sent.
     reactivate_snoozed(tasks, now)
+    # Stale storm guard: pending tasks whose moment passed more than
+    # staleExpireMin minutes ago (first deployment, long shutdown) are
+    # expired in place, so this tick neither sends nor queues them and
+    # no follow_up is derived from them.
+    expired_n = expire_stale_tasks(tasks, now, stale_min)
     tasks += generate_follow_ups(
         tasks, by_id, now,
         grace_min=int(prefs.get("followUpGraceMin", DEFAULT_FOLLOWUP_GRACE_MIN)),
@@ -154,6 +177,9 @@ def main():
         save(data, "occurrences.json", occs)
         save(data, "reminders.json", tasks)
     print(f"occurrences: {len(occs)}  reminder tasks: {len(tasks)}")
+    if expired_n:
+        print(f"[过期作废] {expired_n} 条 pending 提醒已超过 {stale_min} 分钟未发送"
+              "（staleExpireMin），已标记 expired，不会发送。")
     if provider.enabled:
         print(f"weather: {provider.status}（出门提醒已按天气叠加提前量，见任务 weatherNote）")
     if not args.tick:
@@ -184,6 +210,12 @@ def main():
         if requeued:
             print(f"[会话重排] {requeued} 条 queued 超过 {SESSION_REQUEUE_MIN} 分钟未确认，"
                   "已回退 pending 并在本 tick 重新排队。")
+        # Tasks the requeue just returned to pending may themselves be
+        # long past their moment (unconfirmed since a shutdown): expire
+        # those instead of re-speaking them in this same tick.
+        expired2 = expire_stale_tasks(tasks, now, stale_min)
+        if expired2:
+            print(f"[过期作废] 其中 {expired2} 条回退任务本身已过期，标记 expired，不再重排。")
         results = queue_due_for_session(tasks, by_id, sender, now, user=user)
         save(data, "reminders.json", tasks)  # write back queued/failed outcomes
         queued = [r for r in results if r["status"] == "queued"]

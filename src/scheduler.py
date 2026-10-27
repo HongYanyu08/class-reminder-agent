@@ -1,13 +1,50 @@
 """Generate ReminderTasks for Occurrences and find due ones.
 All times computed deterministically from data; message wording has a template fallback."""
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .weather import extra_minutes as _weather_extra
 
 TZ = "+08:00"
+DEFAULT_TZ_NAME = "Asia/Shanghai"
 
 def _parse(dt_str):
     return datetime.fromisoformat(dt_str)
+
+def as_aware(value, tz_name=DEFAULT_TZ_NAME):
+    """Parse an ISO datetime into an aware datetime.
+
+    Internal timestamps (Occurrence startAt, ReminderTask scheduledAt)
+    always carry an offset, but a user-supplied moment — e.g.
+    `run_scheduler.py --now 2026-10-27T21:05` — may be naive. A naive
+    value is interpreted as wall-clock time in tz_name (the term's
+    timezone) instead of crashing later with "can't compare offset-naive
+    and offset-aware datetimes". Aware values pass through untouched."""
+    dt = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(tz_name or DEFAULT_TZ_NAME))
+    return dt
+
+def normalize_now_iso(value, tz_name=DEFAULT_TZ_NAME):
+    """as_aware() for a 'now' argument, returned as an ISO string so the
+    normalized value can flow through the existing string-based pipeline."""
+    return as_aware(value, tz_name).isoformat()
+
+def data_tz_name(data_dir):
+    """Timezone a data dir's naive user input should be read in:
+    term.json's timezone, else user.json's, else Asia/Shanghai.
+    Unreadable files are skipped — this only picks an interpretation
+    for naive input, it never blocks a run."""
+    for name in ("term.json", "user.json"):
+        try:
+            obj = json.loads((Path(data_dir) / name).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("timezone"):
+            return obj["timezone"]
+    return DEFAULT_TZ_NAME
 
 def generate_reminders(occurrences, courses, prefs, weather_at=None):
     """Build the three reminder tasks per occurrence.
@@ -69,6 +106,48 @@ def find_due(tasks, now_iso):
     now = _parse(now_iso)
     return [t for t in tasks if t["status"] == "pending" and _parse(t["scheduledAt"]) <= now]
 
+# ------------------------------------------------------------ stale expiry ----
+DEFAULT_STALE_EXPIRE_MIN = 120
+
+def expire_stale_tasks(tasks, now_iso, stale_min=DEFAULT_STALE_EXPIRE_MIN):
+    """Flip long-overdue pending tasks to the terminal status "expired".
+
+    The stale storm this prevents: on a first deployment, or after the
+    laptop was off/asleep for hours, the next tick would otherwise
+    dispatch every pending reminder whose moment has long passed — a
+    flood of "该出门了" for classes already over. A pending task whose
+    scheduledAt is more than stale_min minutes before now (preference
+    staleExpireMin, default 120) is marked expired (expiredAt stamped)
+    and from then on is inert: find_due only picks up pending tasks,
+    merge_task_states preserves the expired status (and expiredAt)
+    across regenerations, and generate_follow_ups only looks at *sent*
+    tasks — so an expired task never sends and never nags.
+
+    Only pending tasks are touched. In particular queued session tasks
+    keep their own 15-minute requeue recovery (src/session_dispatch):
+    expire runs before queueing in a tick, and again right after the
+    session requeue step, so a task that falls back to pending after a
+    long unconfirmed queue is expired in the same tick instead of being
+    re-spoken. stale_min <= 0 disables expiry. Returns the count."""
+    stale_min = int(stale_min)
+    if stale_min <= 0:
+        return 0
+    now = _parse(now_iso)
+    limit = timedelta(minutes=stale_min)
+    count = 0
+    for task in tasks:
+        if task.get("status") != "pending":
+            continue
+        try:
+            age = now - _parse(task["scheduledAt"])
+        except (KeyError, TypeError, ValueError):
+            continue  # unschedulable task: leave it for dispatch to fail loudly
+        if age > limit:
+            task["status"] = "expired"
+            task["expiredAt"] = now_iso
+            count += 1
+    return count
+
 # ------------------------------------------------------------ state merge ----
 # run_scheduler regenerates tasks from occurrences on every tick. Runtime
 # state (sent/failed/...) lives only in reminders.json, so regeneration must
@@ -76,7 +155,7 @@ def find_due(tasks, now_iso):
 # and be sent again on the next tick.
 _RUNTIME_FIELDS = ("status", "sentAt", "queuedAt", "channel", "error", "retryCount", "lastAttemptAt",
                    "acknowledgedAt", "snoozedAt", "snoozeUntil", "resumedAt",
-                   "reply", "note", "cancelledAt", "cancelReason")
+                   "reply", "note", "cancelledAt", "cancelReason", "expiredAt")
 
 def merge_task_states(generated, existing):
     """Overlay stored runtime state onto freshly generated tasks (by id).

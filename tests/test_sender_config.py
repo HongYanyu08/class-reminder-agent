@@ -48,6 +48,12 @@ class TempDataCase(unittest.TestCase):
         shutil.copytree(DATA, self.data)
         # the tracked example file is a template, not live settings
         (self.data / "sender_settings.example.json").unlink(missing_ok=True)
+        # The CLI tests here drive sends at a fixed "now" where the
+        # sample tasks are long overdue — disable stale expiry (its
+        # own coverage lives in test_freshness.py).
+        user = json.loads((self.data / "user.json").read_text(encoding="utf-8"))
+        user.setdefault("preferences", {})["staleExpireMin"] = 0
+        (self.data / "user.json").write_text(json.dumps(user), encoding="utf-8")
 
     def tearDown(self):
         shutil.rmtree(self.tmp)

@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.ack import parse_reply, plan_reply, apply_plan, KIND_LABELS, DEFAULT_SNOOZE_MIN
+from src.scheduler import normalize_now_iso, data_tz_name
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -39,7 +40,10 @@ def main():
     args = ap.parse_args()
 
     data = Path(args.data_dir)
-    now = args.now or datetime.now().astimezone().isoformat()
+    # A naive --now is read in the data dir's timezone, never compared
+    # raw against the aware timestamps stored in reminders.json.
+    now = (normalize_now_iso(args.now, data_tz_name(data)) if args.now
+           else datetime.now().astimezone().isoformat())
     tasks = load(data, "reminders.json", [])
     occurrences = load(data, "occurrences.json", [])
     courses = load(data, "courses.json", [])
