@@ -202,7 +202,7 @@ schtasks /Query /TN "ClassReminderTick"
 ```powershell
 py scripts\run_scheduler.py --tick --send --from 2026-10-28 --now 2026-10-28T21:00:00+08:00
 py scripts\speak_trigger.py --dry-run
-py scripts\tick_task.cmd
+scripts\tick_task.cmd
 ```
 
 （日期按你测试当天改。）`--dry-run` 那行应打印出完整的唤醒命令且
@@ -217,6 +217,15 @@ py scripts\tick_task.cmd
 `openclaw.cmd cron --help` 为准）。任何一步失败则回滚：
 `openclaw.cmd cron enable <cr-tick-5min 的 id>` 恢复旧链路，再运行
 `scripts\uninstall_tick_task.cmd` 撤掉任务计划，系统回到切换前状态。
+
+两条 Windows 实机经验（2026-10-28 晚冒烟实测，后来者别再踩）：
+一是 Windows 的 Python 没有系统时区库、通常也没装 tzdata 包，
+`zoneinfo.ZoneInfo("Asia/Shanghai")` 会直接抛错——核心代码已用
+`src/tzutil.py` 做分层兜底（ZoneInfo → 上海固定 UTC+8 → 本地
+时区），tick 不带 `--from` 也不会再崩，不要为此装包或改系统。
+二是 `scripts\*.cmd` 必须保持纯 ASCII：GBK 的 cmd.exe 会把
+UTF-8 中文注释拆成乱码当命令执行，所以那三个脚本的注释只有
+英文，以后改它们时不要写回中文。
 
 ## 日常使用
 

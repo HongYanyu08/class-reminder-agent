@@ -19,8 +19,12 @@ verified against the target machine's OpenClaw build: the default
 below is the documented shape, DEPLOY.md tells the operator to check
 `openclaw.cmd cron add --help` on the laptop first, and the env var
 REMINDER_SPEAK_CMD overrides the template without touching code.
-The wake text itself contains no quote characters on purpose, so the
-template may safely wrap {text} in quotes if that build requires it.
+The wake text itself contains no spaces and no quote characters on
+purpose (see SPEAK_WAKE_TEXT): under cmd.exe it stays a single
+argument no matter how the template is quoted, because anything
+with spaces risks being split into several arguments when the
+laptop's REMINDER_SPEAK_CMD override dropped the wrapping quotes
+(2026-10-28 smoke test: the wake command exited 1).
 
 Throttle: wakes are rate-limited to one per
 SPEAK_TRIGGER_MIN_INTERVAL_MIN minutes per data dir, recorded in
@@ -32,6 +36,7 @@ whichever wake comes next.
 import json, os, subprocess, sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from .session_dispatch import list_queued_tasks
 
@@ -46,19 +51,35 @@ DEFAULT_SPEAK_CMD_TEMPLATE = (
     "openclaw.cmd cron add --name cr-speak-{stamp} --at +20s "
     "--session main --system-event {text} --delete-after-run")
 
-# Fixed wake wording (no quote characters, by design — see above).
+# Fixed wake wording. Deliberately ZERO half-width spaces and zero
+# quote characters: on the laptop the rendered command runs through
+# cmd.exe (GBK locale), where a spaced value can be split into
+# several arguments depending on how the operator's
+# REMINDER_SPEAK_CMD template quotes {text} — the 2026-10-28 smoke
+# test's wake command exited 1 for exactly that class of reason.
+# A single space-free token is one argument under every quoting.
+# test_speak_trigger pins both properties; do not add spaces.
 SPEAK_WAKE_TEXT = (
-    "【上课提醒·待念】请在项目目录运行 py scripts\\run_scheduler.py "
-    "--speak-pending，把输出中 [SESSION-SPEAK] 区块的每一行原样、逐条单独"
-    "发到本微信会话，然后运行输出末尾给出的 --confirm-sent 命令。"
-    "若区块为空，只回复 NO_REPLY，不要输出任何其他文字。")
+    "【上课提醒·待念】请按HEARTBEAT.md的待念流程处理："
+    "运行待念清单命令、逐条原样念出待念提醒、再运行确认命令；"
+    "没有待念只回复NO_REPLY")
 
 
 def _shell_runner(command):
     """Production runner: execute the rendered template via the shell
-    (on Windows this resolves openclaw.cmd through cmd.exe). Returns
-    the CompletedProcess; may raise, the caller converts to exit 1."""
-    return subprocess.run(command, shell=True, capture_output=True, text=True)
+    (on Windows this resolves openclaw.cmd through cmd.exe).
+
+    Output is captured as BYTES and decoded as UTF-8 with
+    replacement. The laptop console locale is GBK; decoding the
+    CLI's UTF-8 output with the locale codec made the subprocess
+    reader thread die with UnicodeDecodeError in the 2026-10-28
+    smoke test. Returns a namespace with text stdout/stderr so the
+    caller (and its failure messages) never touches bytes."""
+    proc = subprocess.run(command, shell=True, capture_output=True)
+    return SimpleNamespace(
+        returncode=proc.returncode,
+        stdout=proc.stdout.decode("utf-8", errors="replace"),
+        stderr=proc.stderr.decode("utf-8", errors="replace"))
 
 
 def build_speak_command(now, template=None):

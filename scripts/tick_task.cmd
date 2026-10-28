@@ -1,17 +1,24 @@
 @echo off
 rem ============================================================
-rem  上课提醒 · 定时 tick 入口（根治版自动化）
-rem  由 Windows 任务计划 ClassReminderTick 每 5 分钟调用本脚本。
-rem  路径全部由本脚本位置推导，项目搬家不需要改这里。
+rem  Class reminder - scheduled tick entry (event-driven setup).
+rem  Called by Windows Task Scheduler job ClassReminderTick
+rem  every 5 minutes. All paths derive from this script's own
+rem  location, so moving the project folder needs no edits here.
 rem ============================================================
-rem  第 1 步：确定性 tick —— 展开课表、生成提醒、到期排队（session
-rem  通道）、排队超时未确认自动走备用通道补发。全部在脚本内完成，
-rem  不依赖小课主会话醒着没有。--from 缺省即 term 时区的今天。
-rem  第 2 步：说话触发器 —— 只有真有 queued 待念提醒时才一次性
-rem  唤醒主会话让小课念出来；没有待念就静默退出，不打扰。
-rem  顺序不能反：触发器只看 tick 刚写入的 queued 状态。
-rem  两步互不阻断：tick 失败也照样跑触发器，因为队列里可能还有
-rem  上一轮遗留的待念任务正等着被念出来。
+rem  Step 1: deterministic tick - expand the timetable, build
+rem  reminders, queue the due ones (session channel), escalate
+rem  stale queued ones through the fallback channel. All of it
+rem  runs inside the script; it never depends on the main
+rem  session being awake. --from defaults to today in the
+rem  term timezone.
+rem  Step 2: speak trigger - only when queued reminders are
+rem  actually waiting does it fire a one-shot wake for the main
+rem  session to speak them; nothing queued means silent exit.
+rem  Order matters: the trigger reads the queued state that
+rem  the tick has just written.
+rem  The two steps do not block each other: even if the tick
+rem  fails, the trigger still runs, because the queue may hold
+rem  speak-pending items left over from a previous round.
 cd /d %~dp0..
 py scripts\run_scheduler.py --tick --send
 py scripts\speak_trigger.py

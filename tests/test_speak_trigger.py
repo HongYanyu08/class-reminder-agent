@@ -10,8 +10,10 @@ import contextlib, importlib.util, io, json, os, subprocess, sys, tempfile, unit
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src import speak_trigger as speak_trigger_mod
 from src.session_dispatch import list_queued_tasks
 from src.speak_trigger import (DEFAULT_SPEAK_CMD_TEMPLATE, SPEAK_WAKE_TEXT,
                                STATE_FILENAME, run_speak_trigger)
@@ -172,7 +174,8 @@ class SpeakTriggerTest(unittest.TestCase):
             self.assertIn("--name cr-speak-20261028-210000", command)
             self.assertIn("--session main", command)
             self.assertIn("【上课提醒·待念】", command)
-            self.assertIn("--speak-pending", command)
+            self.assertIn(SPEAK_WAKE_TEXT, command)
+            self.assertIn("待念流程", command)
             state = json.loads((data / STATE_FILENAME).read_text(encoding="utf-8"))
             self.assertEqual(state["lastTriggeredAt"], NOW.isoformat())
             self.assertEqual(state["taskIds"], ["r_old"])
@@ -244,8 +247,11 @@ class SpeakTriggerTest(unittest.TestCase):
             self.assertIn("【上课提醒·待念】", runner.calls[0])
 
     def test_wake_text_and_default_template_contract(self):
-        # The wake text must stay quotable: no quote characters at all,
-        # and the default template must carry both placeholders.
+        # The wake text must survive cmd.exe as ONE argument under
+        # any template quoting: no half-width spaces (they split
+        # arguments) and no quote characters at all. The default
+        # template must carry both placeholders.
+        self.assertNotIn(" ", SPEAK_WAKE_TEXT)
         self.assertNotIn('"', SPEAK_WAKE_TEXT)
         self.assertNotIn("'", SPEAK_WAKE_TEXT)
         self.assertIn("{stamp}", DEFAULT_SPEAK_CMD_TEMPLATE)
@@ -263,6 +269,44 @@ class SpeakTriggerTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn("openclaw.cmd cron add", r.stdout)
             self.assertFalse((data / STATE_FILENAME).exists())
+
+
+# ------------------------------------------------- shell runner decoding ----
+class ShellRunnerDecodingTest(unittest.TestCase):
+    def test_shell_runner_decodes_bytes_as_utf8_with_replacement(self):
+        # The GBK laptop console must never take the runner down:
+        # the CLI's UTF-8 output is captured as bytes and decoded
+        # with errors="replace" (the 2026-10-28 smoke test died in
+        # the subprocess reader thread with UnicodeDecodeError).
+        raw = SimpleNamespace(
+            returncode=1,
+            stdout="已创建".encode("utf-8"),
+            stderr=b"error \xff\xad bytes")
+        with mock.patch.object(speak_trigger_mod.subprocess, "run",
+                               return_value=raw) as run_mock:
+            proc = speak_trigger_mod._shell_runner("openclaw.cmd cron add ...")
+        run_mock.assert_called_once()
+        self.assertFalse(run_mock.call_args.kwargs.get("text", False))
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "已创建")
+        self.assertIn("error", proc.stderr)
+        self.assertIn("�", proc.stderr)  # bad bytes replaced, not raised
+
+
+# ------------------------------------------------------------ .cmd files ----
+class CmdScriptsAsciiTest(unittest.TestCase):
+    def test_task_scheduler_cmd_files_are_pure_ascii(self):
+        # GBK cmd.exe mangles UTF-8 Chinese comments into garbage
+        # "commands"; the three Task Scheduler batch files must
+        # stay pure ASCII (2026-10-28 laptop smoke test, Bug 2).
+        for name in ("tick_task.cmd", "install_tick_task.cmd",
+                     "uninstall_tick_task.cmd"):
+            raw = (ROOT / "scripts" / name).read_bytes()
+            try:
+                raw.decode("ascii")
+            except UnicodeDecodeError:
+                self.fail(f"{name} is not pure ASCII")
+            self.assertIn(b"\r\n", raw)  # batch files keep CRLF
 
 
 # ------------------------------------------------------------ --from default ----

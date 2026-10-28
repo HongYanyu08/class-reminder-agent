@@ -63,7 +63,6 @@ Exit codes: 0 ok · 1 at least one send failed · 2 channel misconfigured.
 import argparse, json, sys
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.expand import expand
 from src.scheduler import generate_reminders, find_due, compose_message, \
@@ -76,6 +75,7 @@ from src.session_dispatch import queue_due_for_session, confirm_session_sent, \
     requeue_stale_session_tasks, escalate_stale_queued_tasks, \
     list_queued_tasks, SESSION_REQUEUE_MIN
 from src.weather import build_weather_provider
+from src.tzutil import today_in_tz
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -86,8 +86,13 @@ def save(data, name, obj):
     (data / name).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def default_from_date(tz_name):
-    """The --from default: today's date in the term's timezone."""
-    return datetime.now(ZoneInfo(tz_name or "Asia/Shanghai")).date().isoformat()
+    """The --from default: today's date in the term's timezone.
+
+    Goes through src.tzutil.today_in_tz, which never raises: on
+    Windows (no system tz database, no tzdata package) ZoneInfo
+    alone would crash the OS-scheduled tick before it starts —
+    that is exactly what the 2026-10-28 laptop smoke test hit."""
+    return today_in_tz(tz_name or "Asia/Shanghai").isoformat()
 
 def speak_pending_mode(data):
     """--speak-pending: print what the main-session agent must say NOW.

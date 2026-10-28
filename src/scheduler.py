@@ -3,8 +3,8 @@ All times computed deterministically from data; message wording has a template f
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
+from .tzutil import tzinfo_for
 from .weather import extra_minutes as _weather_extra
 
 TZ = "+08:00"
@@ -24,7 +24,9 @@ def as_aware(value, tz_name=DEFAULT_TZ_NAME):
     and offset-aware datetimes". Aware values pass through untouched."""
     dt = value if isinstance(value, datetime) else datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo(tz_name or DEFAULT_TZ_NAME))
+        # tzinfo_for never raises: on Windows (no tz database, no
+        # tzdata package) Asia/Shanghai degrades to a fixed UTC+8.
+        dt = dt.replace(tzinfo=tzinfo_for(tz_name or DEFAULT_TZ_NAME))
     return dt
 
 def normalize_now_iso(value, tz_name=DEFAULT_TZ_NAME):

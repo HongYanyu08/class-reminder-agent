@@ -1,14 +1,17 @@
 @echo off
 rem ============================================================
-rem  注册 Windows 任务计划：ClassReminderTick（每 5 分钟）
-rem  运行对象由本脚本位置（%~dp0）推导，项目搬家后重跑即可；
-rem  /F 表示同名任务已存在时覆盖更新，本脚本可重复运行。
+rem  Register the Windows scheduled task ClassReminderTick
+rem  (every 5 minutes). The target path derives from this
+rem  script's location (%~dp0), so re-running it after moving
+rem  the project folder re-registers the new path. /F
+rem  overwrites an existing task of the same name, so this
+rem  script is safe to run repeatedly.
 rem ============================================================
 schtasks /Create /TN "ClassReminderTick" /TR "\"%~dp0tick_task.cmd\"" /SC MINUTE /MO 5 /F
 if errorlevel 1 (
-  echo [失败] 任务注册失败，请确认窗口权限后重试。
+  echo [FAILED] Task registration failed. Check the window permissions and retry.
   exit /b 1
 )
-echo [完成] 已注册任务计划 ClassReminderTick（每 5 分钟运行 tick_task.cmd）。
-echo        查看：schtasks /Query /TN "ClassReminderTick"
-echo        立即试跑：schtasks /Run /TN "ClassReminderTick"
+echo [DONE] Scheduled task ClassReminderTick registered (runs tick_task.cmd every 5 minutes).
+echo        View:    schtasks /Query /TN "ClassReminderTick"
+echo        Run now: schtasks /Run /TN "ClassReminderTick"
