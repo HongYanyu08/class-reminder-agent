@@ -25,6 +25,16 @@ or quietly drop them onto the console. Fix or delete the file instead.
 Secrets hygiene: this module masks webhook URLs / gateway commands for
 display (mask_webhook_url / mask_secret), never logs them, and validation
 error messages never echo secret values back.
+
+Fallback (escalation) settings: fallbackChannel / fallbackKey /
+fallbackAfterMin configure the backup delivery used ONLY by the session
+channel (src/fallback.py, wired into the tick in
+src/session_dispatch.py): a reminder that has sat in status "queued"
+for fallbackAfterMin minutes without being confirmed sent is re-sent
+through Server酱 (serverchan) or PushPlus (pushplus), neither of which
+depends on the WeChat context token. fallbackChannel defaults to
+"none" (feature off); a provider without a key also leaves the feature
+off — both cases behave exactly as before this feature existed.
 """
 import json
 import os
@@ -37,7 +47,8 @@ from .sender import CHANNELS, SenderConfigError
 
 SETTINGS_FILENAME = "sender_settings.json"
 SETTING_FIELDS = ("channel", "webhookUrl", "webhookTimeoutSec",
-                  "gatewayCmd", "outboxDir")
+                  "gatewayCmd", "outboxDir",
+                  "fallbackChannel", "fallbackKey", "fallbackAfterMin")
 
 # Which environment variable supplies each field (highest priority source).
 ENV_FOR_FIELD = {
@@ -46,10 +57,20 @@ ENV_FOR_FIELD = {
     "webhookTimeoutSec": "REMINDER_WEBHOOK_TIMEOUT",
     "gatewayCmd": "REMINDER_GATEWAY_CMD",
     "outboxDir": "REMINDER_OUTBOX_DIR",
+    "fallbackChannel": "REMINDER_FALLBACK_CHANNEL",
+    "fallbackKey": "REMINDER_FALLBACK_KEY",
+    "fallbackAfterMin": "REMINDER_FALLBACK_AFTER_MIN",
 }
 
 DEFAULTS = {"channel": "console", "webhookUrl": None, "webhookTimeoutSec": 10,
-            "gatewayCmd": None, "outboxDir": None}
+            "gatewayCmd": None, "outboxDir": None,
+            "fallbackChannel": "none", "fallbackKey": None,
+            "fallbackAfterMin": 15}
+
+# Fallback (backup) providers for session-channel escalation. "none"
+# disables the feature; serverchan/pushplus are built in src/fallback.py.
+FALLBACK_CHANNELS = ("none", "serverchan", "pushplus")
+MIN_FALLBACK_AFTER_MIN, MAX_FALLBACK_AFTER_MIN = 5, 120
 
 # Placeholders the gateway command template may use (src/sender.py contract).
 GATEWAY_PLACEHOLDERS = ("text", "task_id", "type", "user_id")
@@ -208,6 +229,34 @@ def validate_settings(raw, source="设置"):
         elif outbox.strip():
             cleaned["outboxDir"] = outbox.strip()
 
+    fb_channel = raw.get("fallbackChannel")
+    if fb_channel is not None:
+        if not isinstance(fb_channel, str) or \
+                fb_channel.strip().lower() not in FALLBACK_CHANNELS:
+            errors.append(
+                f"fallbackChannel 必须是以下之一：{', '.join(FALLBACK_CHANNELS)}"
+                f"（收到 {fb_channel!r}）")
+        else:
+            cleaned["fallbackChannel"] = fb_channel.strip().lower()
+
+    fb_key = raw.get("fallbackKey")
+    if fb_key is not None:
+        if not isinstance(fb_key, str):
+            errors.append("fallbackKey 必须是字符串")
+        elif fb_key.strip():
+            cleaned["fallbackKey"] = fb_key.strip()
+
+    fb_after = raw.get("fallbackAfterMin")
+    if fb_after is not None:
+        if isinstance(fb_after, bool) or not isinstance(fb_after, (int, float)):
+            errors.append("fallbackAfterMin 必须是数字（分钟）")
+        elif not MIN_FALLBACK_AFTER_MIN <= float(fb_after) <= MAX_FALLBACK_AFTER_MIN:
+            errors.append(
+                f"fallbackAfterMin 必须在 {MIN_FALLBACK_AFTER_MIN}–"
+                f"{MAX_FALLBACK_AFTER_MIN} 分钟之间")
+        else:
+            cleaned["fallbackAfterMin"] = fb_after
+
     if errors:
         raise SenderSettingsError(
             f"{source}不合法：" + "；".join(errors))
@@ -253,16 +302,18 @@ def resolve_sender_config(channel=None, env=None, data_dir=None):
         raw = env.get(env_name)
         if raw is None or str(raw).strip() == "":
             continue
-        if field == "webhookTimeoutSec":
+        if field in ("webhookTimeoutSec", "fallbackAfterMin"):
             try:
                 config[field] = float(raw)
             except (TypeError, ValueError):
                 # Match the historical SenderConfigError for a bad env
-                # timeout; surfacing it even for non-webhook channels is
-                # avoided by keeping the raw value and letting the webhook
-                # branch of build_sender_from_config reject it if used.
+                # timeout; surfacing it even when the field is unused is
+                # avoided by keeping the raw value and letting the code
+                # path that actually uses the field reject it (the
+                # webhook branch of build_sender_from_config, or
+                # src/fallback.py's build_fallback_sender).
                 config[field] = raw
-        elif field == "channel":
+        elif field in ("channel", "fallbackChannel"):
             config[field] = str(raw).strip().lower()
         else:
             config[field] = str(raw).strip()
@@ -276,6 +327,11 @@ def resolve_sender_config(channel=None, env=None, data_dir=None):
         raise SenderConfigError(
             f"未知发送通道 {config['channel']!r}"
             f"（来源：{sources['channel']}），可用通道：{', '.join(CHANNELS)}")
+    if config["fallbackChannel"] not in FALLBACK_CHANNELS:
+        raise SenderConfigError(
+            f"未知备用通道 {config['fallbackChannel']!r}"
+            f"（来源：{sources['fallbackChannel']}），可用备用通道："
+            f"{', '.join(FALLBACK_CHANNELS)}")
     return config, sources
 
 

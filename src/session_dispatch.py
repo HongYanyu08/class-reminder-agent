@@ -30,6 +30,20 @@ reverted to pending at the next tick and queued again in the same
 pass, so a reminder is re-spoken at most once per stale cycle instead
 of being lost. The LLM never computes any of this; it only reads the
 queued wording aloud.
+
+Escalation (src/fallback.py): requeueing alone cannot fix a stale
+WeChat context token — the token only refreshes when the user sends
+an inbound message, so after an overnight silence the re-spoken
+reminders are just as undeliverable (measured 2026-10-28: the 08:05
+departure reminder flushed 50 minutes late, right after the user's
+08:35 inbound). queue_due_for_session therefore also stamps
+firstQueuedAt the FIRST time a task enters queued (requeues refresh
+queuedAt but never firstQueuedAt), and escalate_stale_queued_tasks
+re-sends any task whose firstQueuedAt is at least fallbackAfterMin
+minutes old through a token-free fallback provider (Server酱 /
+PushPlus). A fallback success is a real delivery: the task becomes
+sent with channel "fallback:<provider>", exactly like a confirmed
+session send, so follow_up generation treats it the same.
 """
 from datetime import timedelta
 
@@ -74,10 +88,108 @@ def queue_due_for_session(tasks, occurrences_by_id, sender, now_iso,
         else:
             task["status"] = "queued"
             task["queuedAt"] = now_iso
+            # First-queue stamp for fallback escalation: set only when
+            # absent, so the 15-minute requeue cycle (which pops
+            # queuedAt and re-queues) never restarts the escalation
+            # clock — it runs from the very first queueing.
+            task.setdefault("firstQueuedAt", now_iso)
             task["channel"] = sender.name
             task.pop("error", None)
             results.append({"taskId": task["id"], "type": task.get("type"),
                             "status": "queued", "channel": sender.name,
+                            "message": message})
+    return results
+
+
+def escalate_stale_queued_tasks(tasks, occurrences_by_id, fallback_sender,
+                                now_iso, after_min, user=None,
+                                message_fn=None):
+    """Re-send long-queued session tasks through the fallback sender.
+
+    A task is a candidate when ALL of these hold:
+
+    - status is "queued" (anything else is not the session channel's
+      undelivered business);
+    - its first-queue age — now minus firstQueuedAt — is at least
+      after_min minutes. firstQueuedAt is stamped once by
+      queue_due_for_session and survives requeues, so the clock runs
+      from the first queueing, not the latest requeue. Tasks queued
+      before firstQueuedAt existed fall back to queuedAt (their only
+      stamp; in the live tick flow such a task is normally requeued
+      and re-stamped before it can age much anyway);
+    - it has no fallbackSentAt (a fallback success flips the task to
+      sent, so this is belt-and-braces against hand-edited state);
+    - the retry budget allows an attempt in the CURRENT requeue
+      cycle: a failed attempt records fallbackAttemptQueuedAt = the
+      queuedAt it was tried under, and no second attempt is made
+      until a requeue gives the task a fresh queuedAt. With the
+      5-minute tick and 15-minute requeue, a broken fallback is
+      retried at most once per ~15 minutes, not every tick.
+
+    Success: status=sent, sentAt=now, channel=fallback_sender.name
+    ("fallback:serverchan" / "fallback:pushplus" — honest about the
+    path that delivered), fallbackSentAt=now, fallbackError cleared.
+    The task is thereby indistinguishable from a session-confirmed
+    send for generate_follow_ups, and since it is no longer queued,
+    --confirm-sent will refuse it — the agent must not claim it.
+
+    Failure: the task STAYS queued (the session path keeps its chance
+    — the caller still lists it for speaking this tick), with
+    fallbackAttempts incremented, fallbackError and
+    fallbackLastAttemptAt stamped, and the cycle marker recorded.
+
+    A candidate whose occurrence has vanished cannot be composed, so
+    it is skipped silently (same data-inconsistency surfacing as
+    queue_due: it would already have failed at queue time).
+    fallback_sender=None disables escalation entirely (returns []).
+    Returns one result dict per ATTEMPTED task.
+    """
+    if fallback_sender is None:
+        return []
+    message_fn = message_fn or compose_message
+    now = _parse(now_iso)
+    limit = timedelta(minutes=int(after_min))
+    results = []
+    for task in tasks:
+        if task.get("status") != "queued":
+            continue
+        if task.get("fallbackSentAt"):
+            continue
+        stamp = task.get("firstQueuedAt") or task.get("queuedAt")
+        try:
+            age = now - _parse(stamp)
+        except (TypeError, ValueError):
+            continue  # no usable stamp: cannot age it, leave it queued
+        if age < limit:
+            continue
+        if task.get("fallbackAttemptQueuedAt") is not None and \
+                task.get("fallbackAttemptQueuedAt") == task.get("queuedAt"):
+            continue  # already tried once in this requeue cycle
+        occ = occurrences_by_id.get(task.get("occurrenceId"))
+        if occ is None:
+            continue
+        message = message_fn(occ, task["type"], task)
+        try:
+            fallback_sender.send(task, message,
+                                 {"occurrence": occ, "user": user})
+        except Exception as e:  # SenderError or an unexpected channel bug
+            task["fallbackAttempts"] = int(task.get("fallbackAttempts", 0)) + 1
+            task["fallbackError"] = f"{type(e).__name__}: {e}"
+            task["fallbackLastAttemptAt"] = now_iso
+            task["fallbackAttemptQueuedAt"] = task.get("queuedAt")
+            results.append({"taskId": task["id"], "type": task.get("type"),
+                            "status": "fallback_failed",
+                            "error": task["fallbackError"],
+                            "message": message})
+        else:
+            task["status"] = "sent"
+            task["sentAt"] = now_iso
+            task["channel"] = fallback_sender.name
+            task["fallbackSentAt"] = now_iso
+            task.pop("fallbackError", None)
+            results.append({"taskId": task["id"], "type": task.get("type"),
+                            "status": "fallback_sent",
+                            "channel": fallback_sender.name,
                             "message": message})
     return results
 
@@ -111,7 +223,9 @@ def requeue_stale_session_tasks(tasks, now_iso, stale_min=SESSION_REQUEUE_MIN):
     """Revert queued tasks whose queuedAt is more than stale_min minutes
     before now back to pending, so queue_due_for_session picks them up
     again in the same tick. queuedAt is dropped (the next queue stamps a
-    fresh one) and note records why. A queued task with a missing or
+    fresh one) and note records why. firstQueuedAt is deliberately NOT
+    dropped: the fallback escalation clock keeps running from the first
+    queueing across requeue cycles. A queued task with a missing or
     unparseable queuedAt counts as stale — it can never be confirmed
     sensibly, so recovering it beats stranding it. Returns the count."""
     now = _parse(now_iso)

@@ -81,7 +81,8 @@ class SettingsFileTest(TempDataCase):
         example = json.loads(
             (DATA / "sender_settings.example.json").read_text(encoding="utf-8"))
         self.assertEqual(validate_settings(example),
-                         {"channel": "console", "webhookTimeoutSec": 10})
+                         {"channel": "console", "webhookTimeoutSec": 10,
+                          "fallbackChannel": "none", "fallbackAfterMin": 15})
 
     def test_corrupt_json_is_a_loud_error(self):
         self.write_settings("{not json")

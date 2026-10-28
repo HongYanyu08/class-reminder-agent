@@ -8,7 +8,7 @@
 支持单双周、节假日、调休、临时停课、调课、换教室和天气变化
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-258%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-302%20passing-brightgreen)
 ![OpenClaw](https://img.shields.io/badge/OpenClaw-2026.3.22%2B-orange)
 ![WeChat](https://img.shields.io/badge/channel-WeChat%20ClawBot-07C160?logo=wechat&logoColor=white)
 
@@ -228,7 +228,7 @@ class-reminder-agent/
 ├── src/                      # 确定性核心、发送层、天气、查询和 Web UI
 ├── scripts/                  # 命令行入口与一键部署脚本
 ├── ui/                       # 本地配置页面
-└── tests/                    # 258 个自动化测试
+└── tests/                    # 302 个自动化测试
 ```
 
 ---
@@ -244,6 +244,16 @@ class-reminder-agent/
 | `webhook` | 发送到企业微信机器人或第三方推送服务 |
 | `gateway` | 通过自定义 OpenClaw 网关命令发送 |
 | `session` | **微信 ClawBot 正式部署使用**：由主会话逐条读出并确认回写 |
+| 备用兜底（session 专用） | session 任务排队超过 `fallbackAfterMin` 分钟（默认 15）仍未确认送达时，自动改走 Server酱 / PushPlus 补发，见下方说明 |
+
+**备用兜底（session 通道专用）**：主会话投递依赖微信的 context token，而 token
+只能靠用户主动发消息刷新——过夜没互动后，早晨第一条出门提醒会排着队却送不出去
+（2026-10-28 实测迟到 50 分钟，token 刷新后才积压送达）。在「发送渠道」页开启备用
+通道（Server酱或 PushPlus，填 key、设 `fallbackAfterMin`，默认 15 分钟）后：一条
+提醒从第一次排队起超过该分钟数还没被确认送达，调度器会在 tick 内部自动改走备用
+通道补发，成功即标记 `sent`（channel 记为 `fallback:serverchan` 等，审计可查）；
+补发失败则仍保留在主会话队列里继续朗读，每个重排周期最多重试一次。不开启
+（默认）或没填 key 时，行为与之前完全一致。
 
 <details>
 <summary><b>为什么微信提醒要走“主会话”？</b></summary>
@@ -287,7 +297,7 @@ context token。
 python3 -m unittest discover -s tests
 ```
 
-当前共 **258 个测试**，覆盖：
+当前共 **302 个测试**，覆盖：
 
 - 周次、单双周、假期和调休计算；
 - 课表与调课通知解析；
@@ -296,6 +306,7 @@ python3 -m unittest discover -s tests
 - 对话查课与修改设置；
 - Web 配置页面；
 - 微信主会话两阶段投递；
+- session 备用通道兜底（token 失效时经 Server酱/PushPlus 补发）；
 - 过期提醒作废与时间时区处理；
 - 一键部署脚本。
 

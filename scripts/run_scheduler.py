@@ -21,7 +21,13 @@ session. The session channel is two-phase (src/session_dispatch.py):
 (status queued) and prints [SESSION-SPEAK] lines for the heartbeat agent
 to read aloud verbatim; --confirm-sent then marks them sent. Queued
 tasks left unconfirmed for over 15 minutes fall back to pending and are
-re-queued on the next tick.
+re-queued on the next tick. If a fallback provider is configured
+(fallbackChannel/fallbackKey in the sender settings, src/fallback.py),
+a task first queued at least fallbackAfterMin minutes ago (default 15)
+without being confirmed is additionally re-sent through that
+token-free provider (Server酱 / PushPlus) and marked
+sent with channel "fallback:<provider>" — the fix for a WeChat
+context token that went stale overnight.
 Configuration resolves in src/sender_settings.py: --channel flag >
 REMINDER_* env vars > data/sender_settings.json (the file maintained by
 the Web UI's 发送渠道 page; gitignored because the webhook URL is a
@@ -52,8 +58,10 @@ from src.scheduler import generate_reminders, find_due, compose_message, \
     expire_stale_tasks, normalize_now_iso, data_tz_name, \
     DEFAULT_FOLLOWUP_GRACE_MIN, DEFAULT_STALE_EXPIRE_MIN
 from src.sender import build_sender, SenderConfigError
+from src.fallback import build_fallback_sender
 from src.session_dispatch import queue_due_for_session, confirm_session_sent, \
-    requeue_stale_session_tasks, SESSION_REQUEUE_MIN
+    requeue_stale_session_tasks, escalate_stale_queued_tasks, \
+    SESSION_REQUEUE_MIN
 from src.weather import build_weather_provider
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -202,6 +210,16 @@ def main():
         return 2
 
     if sender.name == "session":
+        # Fallback escalation config is resolved up front (like the
+        # main channel): a provider WITH a key but a broken
+        # fallbackAfterMin aborts the whole send with exit 2 before
+        # any task state is touched, while "none" (default) or a
+        # provider without a key disables escalation silently.
+        try:
+            fb_sender, fb_after_min = build_fallback_sender(data_dir=data)
+        except SenderConfigError as e:
+            print(f"[发送中止] 备用通道配置错误：{e}", file=sys.stderr)
+            return 2
         # Two-phase session delivery (src/session_dispatch.py): stale
         # queued tasks fall back to pending first, then due tasks are
         # queued into session_outbox.jsonl for the heartbeat agent to
@@ -217,11 +235,30 @@ def main():
         if expired2:
             print(f"[过期作废] 其中 {expired2} 条回退任务本身已过期，标记 expired，不再重排。")
         results = queue_due_for_session(tasks, by_id, sender, now, user=user)
+        # Escalation (src/fallback.py): tasks first queued at least
+        # fallbackAfterMin minutes ago and STILL unconfirmed — the
+        # signature of a stale WeChat context token — are re-sent
+        # through the token-free fallback provider before the agent is
+        # asked to speak anything. Fallback-delivered tasks become sent
+        # and drop out of this tick's [SESSION-SPEAK] list; failed
+        # attempts stay queued and are still spoken as usual.
+        fb_results = escalate_stale_queued_tasks(
+            tasks, by_id, fb_sender, now, fb_after_min, user=user)
         save(data, "reminders.json", tasks)  # write back queued/failed outcomes
         queued = [r for r in results if r["status"] == "queued"]
         failed = [r for r in results if r["status"] == "failed"]
         for r in failed:
             print(f"[FAILED] {r['type']} {r.get('message', '')} — {r['error']}")
+        if fb_results:
+            fb_ok = [r for r in fb_results if r["status"] == "fallback_sent"]
+            fb_bad = [r for r in fb_results if r["status"] == "fallback_failed"]
+            for r in fb_bad:
+                print(f"[备用通道失败] {r['taskId']} — {r['error']}（仍保留 queued，本 tick 继续走主会话朗读）")
+            print(f"[备用通道] {len(fb_ok)} 条经 {fb_sender.provider} 补发成功 / "
+                  f"{len(fb_bad)} 条失败仍排队"
+                  f"（queued 满 {fb_after_min} 分钟未确认后自动补发）")
+            fb_ok_ids = {r["taskId"] for r in fb_ok}
+            queued = [r for r in queued if r["taskId"] not in fb_ok_ids]
         if queued:
             print(f"[SESSION-OUTBOX] 以下 {len(queued)} 条提醒需要你逐条作为独立消息发送到当前会话，不要改动文字：")
             for r in queued:

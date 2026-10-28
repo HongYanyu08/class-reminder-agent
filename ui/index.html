@@ -381,12 +381,42 @@
             </div>
           </div>
 
+          <div id="senderFallbackGroup" class="subsection">
+            <div class="field" style="margin-bottom:10px">
+              <p style="margin:0"><strong>备用通道（主会话兜底）</strong></p>
+              <p style="margin:6px 0 0">只对 <strong>session 主会话通道</strong>生效：微信的 context token 长时间没互动会失效（典型场景：过夜后早晨第一条出门提醒排着队却送不出去）。开启备用通道后，一条提醒排队（queued）超过下面设定的分钟数还没被确认送达，调度器会在 tick 内部自动改走 Server酱 / PushPlus 补发——不依赖 token，补发成功即记为已送达。session 之外的通道不使用这里的设置。</p>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="senderFallbackChannel">备用通道</label>
+                <select id="senderFallbackChannel">
+                  <option value="none">不启用</option>
+                  <option value="serverchan">Server酱</option>
+                  <option value="pushplus">PushPlus</option>
+                </select>
+                <small>需要先在对应服务注册并拿到 key（见 DEPLOY.md 故障排查）。</small>
+              </div>
+              <div class="field">
+                <label for="senderFallbackAfterMin">排队多久后补发（分钟）</label>
+                <input id="senderFallbackAfterMin" type="number" min="5" max="120" step="1" placeholder="15">
+                <small>从第一次排队算起；留空 = 默认 15；范围 5–120。</small>
+              </div>
+              <div class="field" style="grid-column: 1 / -1">
+                <label for="senderFallbackKey">备用通道 Key</label>
+                <input id="senderFallbackKey" type="text" autocomplete="off" spellcheck="false"
+                  placeholder="粘贴 Server酱 的 SendKey 或 PushPlus 的 token">
+                <small>等同密码：只保存在本机 data/sender_settings.json，页面只显示打码版。保持打码版原样保存不会把真 key 冲掉；想换就清空后粘贴新的。</small>
+              </div>
+            </div>
+          </div>
+
           <div class="actions">
             <button id="saveSenderBtn" class="primary" type="submit">保存渠道设置</button>
             <button id="testSenderBtn" class="secondary" type="button">发送测试消息</button>
+            <button id="testFallbackBtn" class="secondary" type="button">发送备用通道测试</button>
             <div id="senderStatus" class="status" role="status" aria-live="polite"></div>
           </div>
-          <p class="section-intro" style="margin-top:12px">「发送测试消息」用当前页面上填的设置（草稿，不先保存）发一条固定测试文案，通不通当场见分晓；失败会显示具体原因。测试不会改动已保存的设置。</p>
+          <p class="section-intro" style="margin-top:12px">两个测试按钮都用当前页面上填的设置（草稿，不先保存）发一条固定测试文案，通不通当场见分晓；失败会显示具体原因。测试不会改动已保存的设置。</p>
         </fieldset>
       </form>
     </div>
@@ -617,6 +647,9 @@ const SOURCE_LABELS = {
   argument: '命令行参数', env: '环境变量', settings: '本页设置文件', default: '默认值',
   draft: '页面草稿'
 };
+const FALLBACK_LABELS = {
+  none: '不启用', serverchan: 'Server酱', pushplus: 'PushPlus'
+};
 
 function buildDemoSender() {
   return {
@@ -629,11 +662,17 @@ function buildDemoSender() {
       gatewayCmdMasked: '',
       hasGatewayCmd: false,
       outboxDir: '',
-      webhookTimeoutSec: 10
+      webhookTimeoutSec: 10,
+      fallbackChannel: 'serverchan',
+      fallbackKeyMasked: 'SCT-demo-key…c3d4',
+      hasFallbackKey: true,
+      fallbackAfterMin: 15
     },
     sources: {
       channel: 'settings', webhookUrl: 'settings', webhookTimeoutSec: 'settings',
-      gatewayCmd: 'default', outboxDir: 'default'
+      gatewayCmd: 'default', outboxDir: 'default',
+      fallbackChannel: 'settings', fallbackKey: 'settings',
+      fallbackAfterMin: 'settings'
     },
     settingsFile: {
       channel: 'webhook',
@@ -642,7 +681,11 @@ function buildDemoSender() {
       gatewayCmdMasked: '',
       hasGatewayCmd: false,
       outboxDir: '',
-      webhookTimeoutSec: 10
+      webhookTimeoutSec: 10,
+      fallbackChannel: 'serverchan',
+      fallbackKeyMasked: 'SCT-demo-key…c3d4',
+      hasFallbackKey: true,
+      fallbackAfterMin: 15
     },
     testMessage: '【测试】上课提醒渠道连通性测试'
   };
@@ -696,6 +739,11 @@ function renderSender() {
   }
   if (eff.channel === 'session') {
     text += ' · 提醒排进 data/session_outbox.jsonl，由 OpenClaw 主会话里的 agent 朗读发送（微信 ClawBot 部署用此项）';
+    if (eff.fallbackChannel && eff.fallbackChannel !== 'none' && eff.hasFallbackKey) {
+      text += ' · 备用通道已开启：' +
+        (FALLBACK_LABELS[eff.fallbackChannel] || eff.fallbackChannel) +
+        '（排队满 ' + (eff.fallbackAfterMin || 15) + ' 分钟未确认自动补发）';
+    }
   }
   const envFields = Object.keys(sources).filter(field => sources[field] === 'env');
   if (envFields.length) {
@@ -714,17 +762,29 @@ function renderSender() {
     ? stored.webhookTimeoutSec : eff.webhookTimeoutSec;
   document.getElementById('senderWebhookTimeout').value =
     timeout === null || timeout === undefined ? '' : String(timeout);
+  document.getElementById('senderFallbackChannel').value =
+    stored.fallbackChannel || eff.fallbackChannel || 'none';
+  document.getElementById('senderFallbackKey').value =
+    stored.fallbackKeyMasked || eff.fallbackKeyMasked || '';
+  const fbAfter = stored.fallbackAfterMin !== null && stored.fallbackAfterMin !== undefined
+    ? stored.fallbackAfterMin : eff.fallbackAfterMin;
+  document.getElementById('senderFallbackAfterMin').value =
+    fbAfter === null || fbAfter === undefined ? '' : String(fbAfter);
   updateSenderGroups();
 }
 
 function collectSenderPayload() {
   const timeoutRaw = document.getElementById('senderWebhookTimeout').value.trim();
+  const fbAfterRaw = document.getElementById('senderFallbackAfterMin').value.trim();
   return {
     channel: document.getElementById('senderChannel').value,
     webhookUrl: document.getElementById('senderWebhookUrl').value.trim(),
     webhookTimeoutSec: timeoutRaw === '' ? null : Number(timeoutRaw),
     gatewayCmd: document.getElementById('senderGatewayCmd').value.trim(),
-    outboxDir: document.getElementById('senderOutboxDir').value.trim()
+    outboxDir: document.getElementById('senderOutboxDir').value.trim(),
+    fallbackChannel: document.getElementById('senderFallbackChannel').value,
+    fallbackKey: document.getElementById('senderFallbackKey').value.trim(),
+    fallbackAfterMin: fbAfterRaw === '' ? null : Number(fbAfterRaw)
   };
 }
 
@@ -733,10 +793,12 @@ async function saveSender(event) {
   const status = document.getElementById('senderStatus');
   const saveBtn = document.getElementById('saveSenderBtn');
   const testBtn = document.getElementById('testSenderBtn');
+  const fbTestBtn = document.getElementById('testFallbackBtn');
   const fieldset = document.getElementById('senderFieldset');
   const payload = collectSenderPayload();
   saveBtn.disabled = true;
   testBtn.disabled = true;
+  fbTestBtn.disabled = true;
   fieldset.disabled = true;
   setStatus(status, demoMode ? '正在更新演示数据…' : '正在保存…');
   try {
@@ -753,6 +815,17 @@ async function saveSender(event) {
         senderState.settingsFile.webhookUrlMasked = masked;
         senderState.settingsFile.hasWebhookUrl = true;
       }
+      senderState.effective.fallbackChannel = payload.fallbackChannel;
+      senderState.settingsFile.fallbackChannel = payload.fallbackChannel;
+      senderState.effective.fallbackAfterMin = payload.fallbackAfterMin;
+      senderState.settingsFile.fallbackAfterMin = payload.fallbackAfterMin;
+      if (payload.fallbackKey && payload.fallbackKey.indexOf('•') === -1 &&
+          payload.fallbackKey.indexOf('…') === -1) {
+        senderState.effective.fallbackKeyMasked = '••••••••';
+        senderState.effective.hasFallbackKey = true;
+        senderState.settingsFile.fallbackKeyMasked = '••••••••';
+        senderState.settingsFile.hasFallbackKey = true;
+      }
       renderSender();
       setStatus(status, '演示模式不会保存到文件；本次修改只在本页演示数据里生效。', 'success');
     } else {
@@ -767,24 +840,37 @@ async function saveSender(event) {
   } finally {
     saveBtn.disabled = false;
     testBtn.disabled = false;
+    fbTestBtn.disabled = false;
     fieldset.disabled = false;
   }
 }
 
 async function testSender() {
+  await runSenderTest('main');
+}
+
+async function testFallbackSender() {
+  await runSenderTest('fallback');
+}
+
+async function runSenderTest(target) {
   const status = document.getElementById('senderStatus');
   const saveBtn = document.getElementById('saveSenderBtn');
   const testBtn = document.getElementById('testSenderBtn');
+  const fbTestBtn = document.getElementById('testFallbackBtn');
   const fieldset = document.getElementById('senderFieldset');
+  const label = target === 'fallback' ? '备用通道测试' : '测试';
   if (demoMode) {
     setStatus(status, '演示模式：这是模拟测试，并没有真的发出任何消息。连接本地服务后，这里会用当前草稿设置真发一条测试消息。');
     return;
   }
   const payload = collectSenderPayload();
+  if (target === 'fallback') payload.target = 'fallback';
   saveBtn.disabled = true;
   testBtn.disabled = true;
+  fbTestBtn.disabled = true;
   fieldset.disabled = true;
-  setStatus(status, '正在发送测试消息…');
+  setStatus(status, '正在发送' + label + '消息…');
   try {
     const response = await fetch('/api/sender/test', {
       method: 'POST',
@@ -794,18 +880,19 @@ async function testSender() {
     let data = null;
     try { data = await response.json(); } catch (error) { data = null; }
     if (data && data.ok) {
-      setStatus(status, '测试成功：' + (data.message || '测试消息已发送') +
+      setStatus(status, label + '成功：' + (data.message || '测试消息已发送') +
         (data.detail ? '（' + data.detail + '）' : '') + '。去目标渠道确认一下有没有收到。', 'success');
     } else {
       const reason = (data && (data.error || (data.errors || []).join('\n'))) ||
-        '测试失败，请稍后重试';
-      setStatus(status, '测试失败：' + reason, 'error');
+        label + '失败，请稍后重试';
+      setStatus(status, label + '失败：' + reason, 'error');
     }
   } catch (error) {
-    setStatus(status, '测试失败：' + (error.message || '网络错误'), 'error');
+    setStatus(status, label + '失败：' + (error.message || '网络错误'), 'error');
   } finally {
     saveBtn.disabled = false;
     testBtn.disabled = false;
+    fbTestBtn.disabled = false;
     fieldset.disabled = false;
   }
 }
@@ -1528,6 +1615,7 @@ document.querySelectorAll('.tab').forEach(button => {
 document.getElementById('globalForm').addEventListener('submit', saveGlobal);
 document.getElementById('senderForm').addEventListener('submit', saveSender);
 document.getElementById('testSenderBtn').addEventListener('click', testSender);
+document.getElementById('testFallbackBtn').addEventListener('click', testFallbackSender);
 document.getElementById('senderChannel').addEventListener('change', updateSenderGroups);
 document.getElementById('previewImportBtn').addEventListener('click', previewImport);
 document.getElementById('applyImportBtn').addEventListener('click', applyImport);

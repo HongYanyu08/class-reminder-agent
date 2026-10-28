@@ -153,9 +153,16 @@ def expire_stale_tasks(tasks, now_iso, stale_min=DEFAULT_STALE_EXPIRE_MIN):
 # state (sent/failed/...) lives only in reminders.json, so regeneration must
 # merge it back in — otherwise a task already sent would flip back to pending
 # and be sent again on the next tick.
-_RUNTIME_FIELDS = ("status", "sentAt", "queuedAt", "channel", "error", "retryCount", "lastAttemptAt",
+_RUNTIME_FIELDS = ("status", "sentAt", "queuedAt", "firstQueuedAt", "channel", "error",
+                   "retryCount", "lastAttemptAt",
                    "acknowledgedAt", "snoozedAt", "snoozeUntil", "resumedAt",
-                   "reply", "note", "cancelledAt", "cancelReason", "expiredAt")
+                   "reply", "note", "cancelledAt", "cancelReason", "expiredAt",
+                   # session fallback escalation bookkeeping (src/fallback.py,
+                   # src/session_dispatch.py): losing any of these across a
+                   # regeneration would reset the escalation timer or the
+                   # once-per-requeue-cycle retry budget.
+                   "fallbackSentAt", "fallbackError", "fallbackAttempts",
+                   "fallbackAttemptQueuedAt", "fallbackLastAttemptAt")
 
 def merge_task_states(generated, existing):
     """Overlay stored runtime state onto freshly generated tasks (by id).

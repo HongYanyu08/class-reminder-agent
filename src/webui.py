@@ -17,7 +17,10 @@ Safety model:
 - The 发送渠道 endpoints never return a full webhook URL or gateway
   command: only masked renderings (src/sender_settings.py). A submitted
   masked/empty secret keeps the stored value, so the masked display can
-  round-trip through the form without destroying the real secret.
+  round-trip through the form without destroying the real secret. The
+  same treatment covers the session channel's fallback provider
+  (fallbackChannel / fallbackKey / fallbackAfterMin, src/fallback.py);
+  the test endpoint takes target="main" (default) or "fallback".
 - The 导入课表 endpoints reuse the deterministic parser in
   src/timetable_import.py and mirror scripts/import_timetable.py:
   preview parses only and never writes; apply re-parses the same raw
@@ -456,11 +459,12 @@ def _secret_values(data_dir, env, extra=()):
         stored = load_settings_file(data_dir)
     except SenderSettingsError:
         stored = {}
-    for field in ("webhookUrl", "gatewayCmd"):
+    for field in ("webhookUrl", "gatewayCmd", "fallbackKey"):
         if stored.get(field):
             values.add(stored[field])
     env = os.environ if env is None else env
-    for name in ("REMINDER_WEBHOOK_URL", "REMINDER_GATEWAY_CMD"):
+    for name in ("REMINDER_WEBHOOK_URL", "REMINDER_GATEWAY_CMD",
+                 "REMINDER_FALLBACK_KEY"):
         if env.get(name):
             values.add(env[name])
     return [value for value in values if value]
@@ -476,6 +480,18 @@ def _load_stored_or_error(data_dir):
         ) from exc
 
 
+def _fallback_view_fields(source):
+    """The fallback (session escalation) slice of a sender view, from
+    either a resolved config or the raw stored settings. The key only
+    ever leaves as a masked rendering plus a has-key flag."""
+    return {
+        "fallbackChannel": (source or {}).get("fallbackChannel") or "none",
+        "fallbackKeyMasked": mask_secret((source or {}).get("fallbackKey")),
+        "hasFallbackKey": bool((source or {}).get("fallbackKey")),
+        "fallbackAfterMin": (source or {}).get("fallbackAfterMin"),
+    }
+
+
 def _sender_view_from(config, sources, stored):
     effective = {
         "channel": config.get("channel"),
@@ -485,6 +501,7 @@ def _sender_view_from(config, sources, stored):
         "hasGatewayCmd": bool(config.get("gatewayCmd")),
         "outboxDir": config.get("outboxDir") or "",
         "webhookTimeoutSec": config.get("webhookTimeoutSec"),
+        **_fallback_view_fields(config),
     }
     stored_view = None
     if stored is not None:
@@ -496,6 +513,7 @@ def _sender_view_from(config, sources, stored):
             "hasGatewayCmd": bool(stored.get("gatewayCmd")),
             "outboxDir": stored.get("outboxDir") or "",
             "webhookTimeoutSec": stored.get("webhookTimeoutSec"),
+            **_fallback_view_fields(stored),
         }
     return {
         "ok": True,
@@ -520,6 +538,7 @@ def get_sender_view(data_dir, env=None):
     view = _sender_view_from(config, sources, stored)
     view["webhookUrlMasked"] = view["effective"]["webhookUrlMasked"]
     view["gatewayCmdMasked"] = view["effective"]["gatewayCmdMasked"]
+    view["fallbackKeyMasked"] = view["effective"]["fallbackKeyMasked"]
     view["settings"] = view["settingsFile"]
     return view
 
@@ -542,7 +561,7 @@ def _clean_sender_draft(payload, stored):
     if not payload:
         raise WebUIError("没有提交任何要保存的字段")
     merged = dict(stored or {})
-    for field in ("webhookUrl", "gatewayCmd"):
+    for field in ("webhookUrl", "gatewayCmd", "fallbackKey"):
         if field not in payload:
             continue
         value = payload[field]
@@ -552,7 +571,8 @@ def _clean_sender_draft(payload, stored):
             pass  # keep the stored secret untouched
         else:
             merged[field] = value
-    for field in ("channel", "webhookTimeoutSec", "outboxDir"):
+    for field in ("channel", "webhookTimeoutSec", "outboxDir",
+                  "fallbackChannel", "fallbackAfterMin"):
         if field not in payload:
             continue
         value = payload[field]
@@ -593,21 +613,47 @@ def send_sender_test(data_dir, payload, env=None, transport=None,
     """Send one fixed test message through a DRAFT sender configuration
     (the submitted payload merged over the stored settings; nothing is
     written to disk). Send failures are reported, never raised and never
-    hidden; every string in the result is scrubbed of full secrets."""
+    hidden; every string in the result is scrubbed of full secrets.
+
+    The payload may carry "target": "main" (default — the primary
+    channel, the historical behaviour) or "target": "fallback" (the
+    Server酱/PushPlus escalation provider from the draft's
+    fallbackChannel/fallbackKey). "target" is a test selector, not a
+    setting; it is stripped before the draft merge so it never reaches
+    validate_settings."""
+    if not isinstance(payload, dict):
+        raise WebUIError("请求体必须是 JSON 对象")
+    target = payload.get("target") or "main"
+    if target not in ("main", "fallback"):
+        raise WebUIError(f"未知测试目标 target：{target!r}（可用：main / fallback）")
+    payload = {k: v for k, v in payload.items() if k != "target"}
     stored = _load_stored_or_error(data_dir)
-    draft = _clean_sender_draft(payload, stored)
+    if payload:
+        draft = _clean_sender_draft(payload, stored)
+    else:
+        # No draft fields at all: the test targets the stored settings
+        # exactly as saved (the save path's "empty submission" guard
+        # does not apply — nothing is being written here).
+        draft = validate_settings(dict(stored), source="发送渠道设置")
     config = {
         "channel": draft.get("channel") or "console",
         "webhookUrl": draft.get("webhookUrl"),
         "webhookTimeoutSec": draft.get("webhookTimeoutSec", 10),
         "gatewayCmd": draft.get("gatewayCmd"),
         "outboxDir": draft.get("outboxDir"),
+        "fallbackChannel": draft.get("fallbackChannel"),
+        "fallbackKey": draft.get("fallbackKey"),
+        "fallbackAfterMin": draft.get("fallbackAfterMin"),
     }
     secrets = _secret_values(data_dir, env, extra=(
-        draft.get("webhookUrl"), draft.get("gatewayCmd")))
+        draft.get("webhookUrl"), draft.get("gatewayCmd"),
+        draft.get("fallbackKey")))
 
     def scrub(text):
         return sanitize_text(text, secrets)
+
+    if target == "fallback":
+        return _send_fallback_test(draft, scrub, transport)
 
     try:
         if sender_factory is not None:
@@ -634,6 +680,46 @@ def send_sender_test(data_dir, payload, env=None, transport=None,
         "ok": True,
         "channel": sender.name,
         "message": f"测试消息已通过「{sender.name}」通道发送",
+        "detail": scrub(result.get("detail", "")),
+        "testMessage": TEST_MESSAGE,
+    }
+
+
+def _send_fallback_test(draft, scrub, transport):
+    """The target="fallback" half of send_sender_test: push the fixed
+    test message through the draft's fallback provider. An unconfigured
+    provider/key is a clean ok=False result (the user is mid-setup),
+    never an exception; the real send uses src/fallback.py with the
+    injected transport in tests."""
+    from .fallback import FallbackSender
+
+    provider = draft.get("fallbackChannel") or "none"
+    key = draft.get("fallbackKey")
+    name = f"fallback:{provider}" if provider != "none" else "fallback"
+    if provider == "none":
+        return {"ok": False, "channel": name,
+                "error": "备用通道未启用：先在上面选 Server酱 或 PushPlus 再测试"}
+    if not key:
+        return {"ok": False, "channel": name,
+                "error": f"备用通道 {provider} 还没有填写 key，无法发送测试"}
+    try:
+        sender = FallbackSender(provider, key, transport=transport)
+    except SenderConfigError as exc:
+        return {"ok": False, "channel": name, "error": scrub(str(exc))}
+    task = {"id": "channel-test", "occurrenceId": None, "type": "test",
+            "scheduledAt": None}
+    try:
+        result = sender.send(task, TEST_MESSAGE, {}) or {}
+    except SenderError as exc:
+        return {"ok": False, "channel": sender.name,
+                "error": scrub(str(exc))}
+    except Exception as exc:  # a channel bug must surface, not crash the API
+        return {"ok": False, "channel": sender.name,
+                "error": scrub(f"发送失败：{type(exc).__name__}: {exc}")}
+    return {
+        "ok": True,
+        "channel": sender.name,
+        "message": f"测试消息已通过备用通道「{sender.name}」发送",
         "detail": scrub(result.get("detail", "")),
         "testMessage": TEST_MESSAGE,
     }

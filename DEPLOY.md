@@ -158,7 +158,7 @@ python3 scripts/deploy_setup.py             # 正式执行
 |---|---|
 | `openclaw message send` 报 `sendMessage ret=-3 invalid arguments` | 预期行为：直发路径不带 context token。本项目不走直发，确认 `data/sender_settings.json` 是 `"channel": "session"` 且 `cr-tick-5min` 任务存在（重跑 `deploy_setup.py`） |
 | 登录插件/调 DeepSeek 报 `fetch failed`、超时 | 代理把国内域名绕去了境外节点。关掉 VPN/代理再试 |
-| 智能体在线但自动提醒没到微信 | 大概率 token 失效：先在微信里给 ClawBot 发一条消息，等下一个 5 分钟 tick；再检查笔记本是否睡着了、网关是否在跑（`openclaw.cmd gateway status`） |
+| 智能体在线但自动提醒没到微信 | 大概率 token 失效：先在微信里给 ClawBot 发一条消息，等下一个 5 分钟 tick；再检查笔记本是否睡着了、网关是否在跑（`openclaw.cmd gateway status`）。**根治办法是开备用通道兜底**（2026-10-28 实测：过夜后 08:05 的出门提醒因 token 失效迟到 50 分钟，用户发消息刷新 token 后才积压送达；重排机制保证不丢，但治不了迟到）：① 去 [Server酱](https://sct.ftqq.com/)（微信扫码登录 →「SendKey」）或 [PushPlus](https://www.pushplus.plus/)（微信扫码登录 →「个人中心」里的 token）注册，拿到 key；② 打开 Web 配置 UI 的「发送渠道」页，在「备用通道（主会话兜底）」里选对应服务、粘贴 key、补发阈值默认 15 分钟即可，点「发送备用通道测试」确认能收到，再保存。开启后，提醒排队（queued）满阈值还没被确认送达，tick 会自动改走备用通道补发（推送到你的微信服务号消息），任务记为 `sent`、channel 为 `fallback:serverchan` / `fallback:pushplus`；tick 输出里会有 `[备用通道] X 条经 … 补发成功` 一行可查。key 只存在本机 `data/sender_settings.json`（已 gitignore），页面上只显示打码版 |
 | 同一条提醒被说了两次 | queued 后 15 分钟没等到 `--confirm-sent` 回写会自动回退重排（至少一次投递的恢复机制）。偶发一次属正常；反复出现说明智能体回写那步在失败，去 TUI 里看它的执行记录 |
 | 某条提醒状态是 failed | failed 不自动重试（防止坏渠道每 5 分钟刷屏）。修好原因后，把 `data/reminders.json` 里对应任务的 `status` 改回 `pending` 再等下一轮 tick |
 | PowerShell 里 `npx`/`openclaw` 提示脚本被禁止运行 | 用 `.cmd` 后缀版本（`npx.cmd`、`openclaw.cmd`），不要去改系统执行策略 |
