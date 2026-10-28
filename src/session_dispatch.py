@@ -44,6 +44,17 @@ minutes old through a token-free fallback provider (Server酱 /
 PushPlus). A fallback success is a real delivery: the task becomes
 sent with channel "fallback:<provider>", exactly like a confirmed
 session send, so follow_up generation treats it the same.
+
+Who asks the agent to speak: originally the 5-minute heartbeat tick
+inside the main session itself. That put an LLM turn on the critical
+path of a deterministic job — the turns accumulated in one session
+(measured 171k tokens by 2026-10-28), slowed down, and one stalled
+turn silently swallowed an afternoon of ticks. The root fix moves
+the tick to the OS scheduler (scripts/tick_task.cmd) and wakes the
+main session ONLY when list_queued_tasks is non-empty
+(scripts/speak_trigger.py); the woken agent re-reads the speak list
+from state via run_scheduler.py --speak-pending instead of trusting
+whatever a single tick printed. See DEPLOY.md 根治版自动化.
 """
 from datetime import timedelta
 
@@ -192,6 +203,43 @@ def escalate_stale_queued_tasks(tasks, occurrences_by_id, fallback_sender,
                             "channel": fallback_sender.name,
                             "message": message})
     return results
+
+
+def list_queued_tasks(tasks, messages_by_id=None):
+    """The state-based speak list: every task currently in status
+    "queued", oldest scheduled first, each with the message the agent
+    is to speak for it.
+
+    This is deliberately a pure read over CURRENT state, not an event
+    stream: the event-driven wake (scripts/speak_trigger.py, see
+    DEPLOY.md 根治版自动化） can only ask "what is still unspoken right
+    now?", and a task queued by an earlier tick whose wake was lost
+    must still show up here — that cross-tick survival is the whole
+    point (2026-10-28: tick turns stalled inside an overgrown main
+    session and queued work had no state-based way to be re-listed).
+    Nothing here mutates the tasks: requeue / expire / escalate stay
+    the tick's job.
+
+    messages_by_id maps taskId -> the exact wording queued for it
+    (the caller resolves it from session_outbox.jsonl, latest record
+    per task wins, falling back to composing from occurrences). A
+    task with no resolvable message gets message=None — the caller
+    decides what to print; in practice unreachable, because a task
+    only becomes queued after SessionSender has written its outbox
+    record. Returns dicts {taskId, type, scheduledAt, message}."""
+    messages_by_id = messages_by_id or {}
+    queued = [t for t in tasks if t.get("status") == "queued"]
+
+    def sort_key(task):
+        try:
+            return (0, _parse(task["scheduledAt"]).isoformat())
+        except (KeyError, TypeError, ValueError):
+            return (1, str(task.get("scheduledAt", "")))
+
+    queued.sort(key=sort_key)
+    return [{"taskId": t["id"], "type": t.get("type"),
+             "scheduledAt": t.get("scheduledAt"),
+             "message": messages_by_id.get(t["id"])} for t in queued]
 
 
 def confirm_session_sent(tasks, task_ids, now_iso):

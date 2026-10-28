@@ -254,9 +254,12 @@ class SessionCliTest(unittest.TestCase):
         return data
 
     def _run(self, data, *extra, now=NOW):
+        # --from is pinned: the scheduler default is now "today", while
+        # these tests replay the sample window starting 2026-09-07.
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "run_scheduler.py"),
-             "--data-dir", str(data), "--now", now, *extra],
+             "--data-dir", str(data), "--from", "2026-09-07",
+             "--now", now, *extra],
             capture_output=True, text=True)
 
     def _tasks(self, data):

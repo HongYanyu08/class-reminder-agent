@@ -195,9 +195,12 @@ class SchedulerCliTest(unittest.TestCase):
         (data / "user.json").write_text(json.dumps(user), encoding="utf-8")
         return data
     def _run(self, data, *extra):
+        # --from is pinned explicitly: the scheduler's default window
+        # now starts "today", while these tests replay 2026-09-13.
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "run_scheduler.py"),
-             "--tick", "--data-dir", str(data), "--now", NOW, *extra],
+             "--tick", "--from", "2026-09-07", "--data-dir", str(data),
+             "--now", NOW, *extra],
             capture_output=True, text=True)
     def test_send_via_outbox_writes_back_and_never_resends(self):
         with tempfile.TemporaryDirectory() as tmp:

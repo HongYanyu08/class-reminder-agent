@@ -15,6 +15,7 @@ __pycache__/
 # data/occurrences.json
 # data/reminders.json
 data/weather_cache.json
+data/speak_trigger_state.json
 data/*.bak-*
 
 # OS / editor

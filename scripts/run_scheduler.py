@@ -14,6 +14,18 @@ Usage:
       # session channel phase 2: after the agent in the OpenClaw main
       # session has spoken the queued reminders aloud, flip exactly
       # those queued tasks to sent (standalone mode, never with --tick)
+  python3 scripts/run_scheduler.py --speak-pending
+      # read-only: print the [SESSION-SPEAK] block for every task that
+      # is queued RIGHT NOW (state-based, so tasks queued by earlier
+      # ticks are listed too) plus the [SESSION-CONFIRM] command line.
+      # This is what the event-driven wake (scripts/speak_trigger.py)
+      # tells the agent to run. Writes nothing; requeue / expire /
+      # escalate remain the tick's job. With nothing queued it prints
+      # exactly one line: [SESSION-SPEAK] （无）
+
+--from defaults to TODAY in the term's timezone (the Windows task
+scheduler entry runs --tick --send with no --from at all); pass it
+explicitly to replay a past window.
 
 Channels (src/sender.py): console (default) / outbox / webhook / gateway /
 session. The session channel is two-phase (src/session_dispatch.py):
@@ -51,6 +63,7 @@ Exit codes: 0 ok · 1 at least one send failed · 2 channel misconfigured.
 import argparse, json, sys
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.expand import expand
 from src.scheduler import generate_reminders, find_due, compose_message, \
@@ -61,7 +74,7 @@ from src.sender import build_sender, SenderConfigError
 from src.fallback import build_fallback_sender
 from src.session_dispatch import queue_due_for_session, confirm_session_sent, \
     requeue_stale_session_tasks, escalate_stale_queued_tasks, \
-    SESSION_REQUEUE_MIN
+    list_queued_tasks, SESSION_REQUEUE_MIN
 from src.weather import build_weather_provider
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,6 +84,57 @@ def load(data, name):
 
 def save(data, name, obj):
     (data / name).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def default_from_date(tz_name):
+    """The --from default: today's date in the term's timezone."""
+    return datetime.now(ZoneInfo(tz_name or "Asia/Shanghai")).date().isoformat()
+
+def speak_pending_mode(data):
+    """--speak-pending: print what the main-session agent must say NOW.
+
+    Strictly read-only: loads reminders.json (+ the queued wording from
+    session_outbox.jsonl) and prints the state-based speak list from
+    src.session_dispatch.list_queued_tasks. It never saves, requeues,
+    expires or escalates — those stay with --tick. A missing
+    reminders.json simply means nothing was ever queued.
+    """
+    if not (data / "reminders.json").exists():
+        print("[SESSION-SPEAK] （无）")
+        return 0
+    tasks = load(data, "reminders.json")
+    # The exact wording queued for each task lives in the outbox the
+    # SessionSender appended to; on requeue cycles a task has several
+    # records and the latest one is the wording last queued.
+    messages = {}
+    outbox = data / "session_outbox.jsonl"
+    if outbox.exists():
+        for line in outbox.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("taskId") and rec.get("message"):
+                messages[rec["taskId"]] = rec["message"]
+    entries = list_queued_tasks(tasks, messages)
+    # Fallback for a queued task with no outbox record (hand-edited
+    # state): compose from the occurrences the last tick persisted.
+    missing = [e for e in entries if not e["message"]]
+    if missing and (data / "occurrences.json").exists():
+        by_id = {o["id"]: o for o in load(data, "occurrences.json")}
+        by_task = {t["id"]: t for t in tasks}
+        for e in missing:
+            occ = by_id.get(by_task[e["taskId"]].get("occurrenceId"))
+            if occ is not None:
+                e["message"] = compose_message(occ, e["type"],
+                                               by_task[e["taskId"]])
+    if not entries:
+        print("[SESSION-SPEAK] （无）")
+        return 0
+    for e in entries:
+        print(f"[SESSION-SPEAK] {e['taskId']} {e['message'] or ''}".rstrip())
+    print("[SESSION-CONFIRM] py scripts/run_scheduler.py --confirm-sent "
+          + ",".join(e["taskId"] for e in entries))
+    return 0
 
 def confirm_sent_mode(data, ids_arg, now):
     """--confirm-sent: flip queued session tasks to sent (phase 2 of the
@@ -100,7 +164,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tick", action="store_true")
     ap.add_argument("--expand", action="store_true")
-    ap.add_argument("--from", dest="from_date", default="2026-09-07")
+    ap.add_argument("--from", dest="from_date", default=None,
+                    help="展开窗口起始日 YYYY-MM-DD（缺省：term 时区的今天）")
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--now", default=None)
     ap.add_argument("--send", action="store_true",
@@ -112,10 +177,20 @@ def main():
     ap.add_argument("--confirm-sent", default=None, metavar="IDS",
                     help="session 通道第二阶段：把逗号分隔的 queued 任务 id 确认为已发送"
                          "（独立模式，不能与 --tick/--expand 同用）")
+    ap.add_argument("--speak-pending", action="store_true",
+                    help="只读：打印当前全部 queued 任务的 [SESSION-SPEAK] 待念清单"
+                         "与 [SESSION-CONFIRM] 确认命令（独立模式，不写任何文件）")
     ap.add_argument("--data-dir", default=str(ROOT / "data"))
     args = ap.parse_args()
 
     data = Path(args.data_dir)
+    if args.speak_pending:
+        if args.tick or args.expand or args.confirm_sent is not None:
+            print("[参数错误] --speak-pending 是独立只读模式，"
+                  "不能与 --tick/--expand/--confirm-sent 同时使用。",
+                  file=sys.stderr)
+            return 2
+        return speak_pending_mode(data)
     if args.confirm_sent is not None:
         if args.tick or args.expand:
             print("[参数错误] --confirm-sent 是独立模式，不能与 --tick/--expand 同时使用。",
@@ -134,12 +209,15 @@ def main():
     if (data / "reminders.json").exists():
         existing = load(data, "reminders.json")
 
-    occs = expand(term, courses, exceptions, args.from_date, args.days)
+    # Timezone first: both the --from default (today) and a naive --now
+    # are read in the term's timezone.
+    tz_name = term.get("timezone") or user.get("timezone") or "Asia/Shanghai"
+    from_date = args.from_date or default_from_date(tz_name)
+    occs = expand(term, courses, exceptions, from_date, args.days)
     prefs = user.get("preferences", {})
     # A naive --now (e.g. "2026-10-27T21:05", no offset) is interpreted
     # in the term's timezone instead of crashing against the aware
     # scheduledAt values; an aware --now passes through untouched.
-    tz_name = term.get("timezone") or user.get("timezone") or "Asia/Shanghai"
     now = (normalize_now_iso(args.now, tz_name) if args.now
            else datetime.now().astimezone().isoformat())
     now_dt = datetime.fromisoformat(now)

@@ -482,6 +482,7 @@ class FallbackCliE2ETest(unittest.TestCase):
 
     def _tick(self, module, data, now):
         argv = ["run_scheduler.py", "--tick", "--send",
+                "--from", "2026-09-07",
                 "--data-dir", str(data), "--now", now]
         out = io.StringIO()
         with mock.patch.object(sys, "argv", argv), \
@@ -578,6 +579,7 @@ class FallbackCliE2ETest(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "run_scheduler.py"),
                  "--tick", "--send", "--channel", "session",
+                 "--from", "2026-09-07",
                  "--data-dir", str(data), "--now", self.NOW2],
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 0,

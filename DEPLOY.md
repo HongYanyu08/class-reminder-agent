@@ -137,6 +137,87 @@ python3 scripts/deploy_setup.py             # 正式执行
 三条提醒的节奏：**前晚预告**（默认前一天 21:00）→ **出门提醒**
 （默认上课前 25 分钟）→ **课前提醒**（默认上课前 10 分钟）。
 
+## 根治版自动化（任务计划）：tick 脱离主会话（2026-10-28 起推荐）
+
+上面第 5 步的 `cr-tick-5min` 方案能用，但 2026-10-28 实测暴露了结构
+问题：每 5 分钟一个 agent 回合全都堆在主会话里，一天下来会话涨到
+171k token，回合越来越慢；当天下午一个回合卡住，后面的 tick 根本
+没执行，体育课的出门/课前提醒**没有排队就丢了**（不是迟到，是从未
+生成发送记录）。根治版把链路拆开：
+
+```
+Windows 任务计划（每 5 分钟）→ scripts\tick_task.cmd
+  ├─ run_scheduler.py --tick --send   确定性 tick：排队/重排/备用补发
+  └─ speak_trigger.py                 只有 queued 非空才一次性唤醒主会话
+主会话（小课）被 cr-speak-* 唤醒 → run_scheduler.py --speak-pending
+  → 逐条原样念出 → --confirm-sent 回写
+```
+
+没有待念提醒时主会话整天不用醒，上下文只随真实聊天增长；tick 永远
+不会被会话堵住；备用通道补发也只依赖脚本，最坏情况是晚
+`fallbackAfterMin` 分钟从备用通道到，不再无声丢失。从旧方案切换的
+顺序必须照下面来，保证任何一步失败都能退回去：
+
+**① 更新代码。** 按老规矩：先备份笔记本上的 `data\`，再用新版代码
+覆盖项目目录（`data\` 不动）。确认新文件都在：
+`scripts\tick_task.cmd`、`scripts\install_tick_task.cmd`、
+`scripts\speak_trigger.py`、`scripts\uninstall_tick_task.cmd`。
+
+**② 先 disable 旧 cron（不要删，留着回滚）。**
+
+```powershell
+openclaw.cmd cron list
+openclaw.cmd cron disable <cr-tick-5min 的 id>
+```
+
+**③ 核对一次性唤醒命令的语法。** 说话触发器默认执行的命令模板是
+
+```
+openclaw.cmd cron add --name cr-speak-{stamp} --at +20s --session main --system-event {text} --delete-after-run
+```
+
+这条命令的确切语法**没有在目标机上验证过**。先在笔记本上看
+`openclaw.cmd cron add --help`，逐项核对 `--at` 的写法、`--session`、
+`--system-event`、`--delete-after-run` 是否都受支持；如果需要把
+`{text}` 用引号包起来或参数名不同，不要改代码，设置环境变量覆盖
+模板（唤醒文案本身不含任何引号字符，就是为这个留的）：
+
+```powershell
+setx REMINDER_SPEAK_CMD "openclaw.cmd cron add --name cr-speak-{stamp} --at +20s --session main --system-event ""{text}"" --delete-after-run"
+```
+
+（`setx` 写的是用户环境变量，新开的任务计划进程能读到；改完先跑一次
+下面的 `--dry-run` 确认渲染出的命令无误。）
+
+**④ 注册任务计划。** 在项目目录里运行：
+
+```powershell
+scripts\install_tick_task.cmd
+schtasks /Query /TN "ClassReminderTick"
+```
+
+**⑤ 冒烟测试（全链路走一遍）。** 用模拟时间把今晚的前晚预告排队，
+再手动跑一遍任务计划脚本，看小课是否自己醒来念出并回写：
+
+```powershell
+py scripts\run_scheduler.py --tick --send --from 2026-10-28 --now 2026-10-28T21:00:00+08:00
+py scripts\speak_trigger.py --dry-run
+py scripts\tick_task.cmd
+```
+
+（日期按你测试当天改。）`--dry-run` 那行应打印出完整的唤醒命令且
+不真正执行；跑完 `tick_task.cmd` 后等约半分钟，小课应在微信里念出
+预告；然后检查 `data\reminders.json` 里对应任务已变成 `sent`。
+注意触发器有 10 分钟节流（状态在 `data\speak_trigger_state.json`）：
+重复冒烟时若发现没再发唤醒，先看是不是被节流了，删掉这个状态
+文件即可立即再试。
+
+**⑥ 收尾与回滚。** 冒烟通过后删除旧 cron：
+`openclaw.cmd cron delete <cr-tick-5min 的 id>`（子命令名以
+`openclaw.cmd cron --help` 为准）。任何一步失败则回滚：
+`openclaw.cmd cron enable <cr-tick-5min 的 id>` 恢复旧链路，再运行
+`scripts\uninstall_tick_task.cmd` 撤掉任务计划，系统回到切换前状态。
+
 ## 日常使用
 
 - **不用打开任何东西**：网关随登录自启，定时任务自己跑。唯一要求是

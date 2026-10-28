@@ -388,7 +388,8 @@ class SchedulerCliSettingsTest(TempDataCase):
         env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "run_scheduler.py"),
-             "--tick", "--send", "--data-dir", str(self.data),
+             "--tick", "--send", "--from", "2026-09-07",
+             "--data-dir", str(self.data),
              "--now", NOW, *extra],
             capture_output=True, text=True, env=env)
 
