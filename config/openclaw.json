@@ -7,7 +7,11 @@
     }
   },
   "session": {
-    "dmScope": "per-channel-peer"
+    "dmScope": "per-channel-peer",
+    "reset": {
+      "mode": "daily",
+      "atHour": 4
+    }
   },
   "tools": {
     "profile": "messaging",
@@ -34,8 +38,8 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "deepseek-chat",
-            "name": "DeepSeek Chat",
+            "id": "deepseek-v4-flash",
+            "name": "DeepSeek V4 Flash",
             "reasoning": false,
             "input": [
               "text"
@@ -44,8 +48,8 @@
             "maxTokens": 8192
           },
           {
-            "id": "deepseek-reasoner",
-            "name": "DeepSeek Reasoner",
+            "id": "deepseek-v4-pro",
+            "name": "DeepSeek V4 Pro",
             "reasoning": true,
             "input": [
               "text"
@@ -60,14 +64,14 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "deepseek/deepseek-chat",
+        "primary": "deepseek/deepseek-v4-flash",
         "fallbacks": [
-          "deepseek/deepseek-reasoner"
+          "deepseek/deepseek-v4-pro"
         ]
       },
       "models": {
-        "deepseek/deepseek-chat": {},
-        "deepseek/deepseek-reasoner": {}
+        "deepseek/deepseek-v4-flash": {},
+        "deepseek/deepseek-v4-pro": {}
       }
     },
     "list": [
@@ -75,7 +79,7 @@
         "id": "class-reminder",
         "name": "Class Reminder",
         "workspace": ".",
-        "model": "deepseek/deepseek-chat"
+        "model": "deepseek/deepseek-v4-flash"
       }
     ]
   },

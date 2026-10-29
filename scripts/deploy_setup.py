@@ -11,7 +11,15 @@ DEPLOY.md). It performs, in order:
   2. data/sender_settings.json: created as {"channel": "session"} when
      missing; an existing file is NEVER overwritten unless --force
      (it may hold a webhook URL, which is a secret);
-  3. the recurring cron job cr-tick-5min (--every 5m, --session main,
+  3. cost-saving gateway settings (2026-10-29 field-tested, see
+     DEPLOY.md "省钱与防烧干设置"): the default model is set to
+     deepseek/deepseek-v4-flash (the pro default burned ~61M tokens /
+     ¥16.52 in one day, and deepseek-chat no longer exists on the
+     DeepSeek API), the gateway is restarted, and the main session is
+     set to reset daily at 04:00 so context cannot grow unbounded.
+     A failed command only prints ⚠ plus the manual command to run —
+     it never fails the whole setup;
+  4. the recurring cron job cr-tick-5min (--every 5m, --session main,
      --wake now) whose system-event tells the main-session agent to run
      the scheduler tick, speak any [SESSION-SPEAK] reminders verbatim
      into the WeChat conversation, then --confirm-sent them. If a job
@@ -160,6 +168,49 @@ def setup_sender_settings(force, dry_run):
     return True
 
 
+# Cost-saving gateway mutations, in order (field-tested 2026-10-29 —
+# see DEPLOY.md "省钱与防烧干设置"): flash as the default model instead
+# of pro (~61M tokens / ¥16.52 burned in one day on pro), a gateway
+# restart so the new model + config take effect, then a daily 04:00
+# session reset so the main session's context cannot grow unbounded.
+# These are MUTATIONS: unlike the read-only probes they must never run
+# under --dry-run (setup_cost_saving prints them instead).
+COST_SAVING_COMMANDS = [
+    ["models", "set", "deepseek/deepseek-v4-flash"],
+    ["gateway", "restart"],
+    ["config", "set", "session.reset.mode", "daily"],
+    ["config", "set", "session.reset.atHour", "4"],
+]
+
+
+def setup_cost_saving(dry_run):
+    """Apply the cost-saving gateway settings. Best-effort by design:
+    a failed command prints ⚠ and the exact command to run by hand,
+    then the step carries on — it never raises and never fails the
+    whole setup, so it always returns True."""
+    exe = openclaw_exe() or "openclaw"
+    failed = 0
+    for args in COST_SAVING_COMMANDS:
+        shown = _display([exe, *args])
+        if dry_run:
+            print(f"[dry-run] 将执行省钱设置：{shown}")
+            continue
+        res = run_openclaw(args, timeout=120)
+        if res is not None and res.returncode == 0:
+            continue
+        failed += 1
+        detail = _first_line(res.stderr) if res is not None else "openclaw 命令不可用"
+        print(f"⚠ 省钱设置未完成：{shown}（{detail}）— 可手动执行这条命令")
+    if dry_run:
+        return True
+    if failed:
+        print(f"⚠ 省钱设置部分完成（{len(COST_SAVING_COMMANDS) - failed}"
+              f"/{len(COST_SAVING_COMMANDS)} 条成功），未成功的按上面命令手动补跑即可")
+    else:
+        print("✓ 省钱设置已应用：默认模型 deepseek-v4-flash + 会话每天 04:00 自动重置")
+    return True
+
+
 def setup_cron(dry_run):
     list_res = run_openclaw(["cron", "list"])
     if (list_res is not None and list_res.returncode == 0
@@ -191,6 +242,10 @@ def setup_cron(dry_run):
 
 NEXT_STEPS = """\
 后续步骤（详见 DEPLOY.md）：
+  0. 省钱设置已在上面一并应用（默认模型 deepseek-v4-flash + 会话每天
+     04:00 自动重置）；另请去 DeepSeek 平台（platform.deepseek.com）
+     打开「余额预警」并设一个阈值——余额耗尽没有任何先兆，表现就是
+     智能体全天静默，预警是唯一的提前量。
   1. 导入你自己的课表：仓库里只有示例数据。截图先转文字，再跑
      scripts/import_timetable.py 预览 → 核对 → --apply 写入；
      或直接用你自己的 term.json / courses.json / exceptions.json 替换 data/ 三件套。
@@ -202,7 +257,7 @@ NEXT_STEPS = """\
 
 def main():
     ap = argparse.ArgumentParser(
-        description="一键部署配置：检查环境 + 写 sender_settings + 建 cr-tick-5min 定时任务")
+        description="一键部署配置：检查环境 + 写 sender_settings + 省钱设置 + 建 cr-tick-5min 定时任务")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印将要执行的每一步和命令，不写文件、不建任务")
     ap.add_argument("--force", action="store_true",
@@ -219,9 +274,10 @@ def main():
     if cli_ok:
         ok = check_weixin_plugin() and ok
         ok = setup_sender_settings(args.force, args.dry_run) and ok
+        ok = setup_cost_saving(args.dry_run) and ok
         ok = setup_cron(args.dry_run) and ok
     else:
-        print("（跳过插件检查、渠道配置与定时任务创建：先装好 OpenClaw 再重跑本脚本）")
+        print("（跳过插件检查、渠道配置、省钱设置与定时任务创建：先装好 OpenClaw 再重跑本脚本）")
     print()
     print(NEXT_STEPS)
     return 0 if ok else 1

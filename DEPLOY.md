@@ -227,6 +227,51 @@ scripts\tick_task.cmd
 UTF-8 中文注释拆成乱码当命令执行，所以那三个脚本的注释只有
 英文，以后改它们时不要写回中文。
 
+## 省钱与防烧干设置（2026-10-29 实测）
+
+这三条都是网关侧设置，不改项目文件，但直接决定运行成本和会不会
+"没钱全天静默"。背景数据：旧链路（每 5 分钟一个主会话回合 + 默认
+pro 模型 + 会话无限增长）曾在一天内烧掉 61,053,456 token /
+¥16.52（375 次请求，平均每次重发约 16 万 token 的上下文），当晚
+余额耗尽——第二天早上全部提醒缺席，就是余额归零的连锁反应（智能
+体每个回合都在计费错误上失败，定时任务连续报错后被网关自动停
+用）。根治版架构已经把 tick 挪出主会话，剩下的花销来自模型档位
+和会话上下文，按下面三条收住：
+
+**① 默认模型选便宜档。** onboard 向导可能默认选到
+`deepseek-v4-pro`（当前 OpenClaw 版本的本地模型目录只预注册了
+它）。实测 `deepseek-v4-flash` 可用且便宜得多，提醒场景完全够
+用；而 `deepseek-chat` 这个 ID 在现在的 DeepSeek API 上不存在，
+设了会报 "model not found"。切换：
+
+```powershell
+openclaw.cmd models set deepseek/deepseek-v4-flash
+openclaw.cmd gateway restart
+openclaw.cmd models status   # 确认 Default 已是 v4-flash，再发条消息实测能回
+```
+
+（目录外 ID 保存时会提示 not in catalog 的警告，以 `models status`
+和实际对话能通为准。）
+
+**② 会话每天自动重置。** 主会话上下文随聊天和唤醒无限增长（实测
+3 天涨到 234k token），每个回合都要全量重发，这是日常花销的大
+头。设成每天凌晨自动开新会话：
+
+```powershell
+openclaw.cmd config set session.reset.mode daily
+openclaw.cmd config set session.reset.atHour 4
+openclaw.cmd config get session   # 应回显 {"reset": {"mode": "daily", "atHour": 4}}
+```
+
+智能体的规矩和长期记忆都在 workspace 文件里，重置聊天记录不影
+响干活。想立刻瘦身可以在微信里发 `/new`（`/compact` 也行，但它
+本身要调一次模型，余额不足时压不动）。
+
+**③ 开 DeepSeek 余额预警。** platform.deepseek.com 的用量信息页
+有「余额预警」设置（默认未开启），设一个阈值（如 ¥5）。余额归零
+前没有任何先兆，唯一的提前量就是这个预警；归零后的表现见本节
+开头——不是提醒迟到，而是全天静默。
+
 ## 日常使用
 
 - **不用打开任何东西**：网关随登录自启，定时任务自己跑。唯一要求是
